@@ -1,0 +1,32 @@
+# Blueprint Steward on one Docker host, beside your codebase. Build or pull the image, fill .env (copy .env.example),
+# then:
+#   docker compose -f deploy/compose/compose.yaml --env-file deploy/compose/.env up -d
+# Run one Steward per repository and organization: two would share one job queue and one clone.
+services:
+  steward:
+    image: ${BLUEPRINT_STEWARD_IMAGE:?set BLUEPRINT_STEWARD_IMAGE to a Steward image}
+    command: [ "start", "--concurrency", "2" ]
+    environment:
+      BLUEPRINT_SERVER: ${BLUEPRINT_SERVER:?set BLUEPRINT_SERVER}
+      BLUEPRINT_REPO_URL: ${BLUEPRINT_REPO_URL:?set BLUEPRINT_REPO_URL}
+      BLUEPRINT_STEWARD_REF: ${BLUEPRINT_STEWARD_REF:-}
+      BLUEPRINT_STEWARD_TOKEN: ${BLUEPRINT_STEWARD_TOKEN:?set BLUEPRINT_STEWARD_TOKEN}
+      GH_TOKEN: ${GH_TOKEN:?set GH_TOKEN}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set CLAUDE_CODE_OAUTH_TOKEN}
+      BLUEPRINT_JIRA_BASE_URL: ${BLUEPRINT_JIRA_BASE_URL:-}
+      BLUEPRINT_JIRA_EMAIL: ${BLUEPRINT_JIRA_EMAIL:-}
+      BLUEPRINT_JIRA_API_TOKEN: ${BLUEPRINT_JIRA_API_TOKEN:-}
+      BLUEPRINT_MERGE_POLL_SECONDS: ${BLUEPRINT_MERGE_POLL_SECONDS:-120}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-Blueprint Steward}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-steward@blueprint.local}
+    # Routine pairs for implementation-dispatch jobs, BLUEPRINT_ROUTINE_<ALIAS>_URL and _TOKEN, go in .env and are
+    # passed through here, one pair per alias, e.g.:
+    #   BLUEPRINT_ROUTINE_TEAM_A_URL: ${BLUEPRINT_ROUTINE_TEAM_A_URL:-}
+    #   BLUEPRINT_ROUTINE_TEAM_A_TOKEN: ${BLUEPRINT_ROUTINE_TEAM_A_TOKEN:-}
+    volumes:
+      - steward-work:/work
+    restart: unless-stopped
+
+volumes:
+  # The clone, its node_modules, the package manager's store and every session worktree.
+  steward-work:

@@ -1,0 +1,67 @@
+image:
+  # Steward's published image, built from this repository. It publishes no latest: set the release tag, or point
+  # repository and tag at an image you built from the Dockerfile.
+  repository: rg.fr-par.scw.cloud/blueprint/steward
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Steward's command and flags; the entrypoint appends --server and --repo.
+args: [ "start", "--concurrency", "2" ]
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 6Gi
+
+# The served clone, its node_modules, the package manager's store and every session worktree.
+storage:
+  size: 50Gi
+  # Empty uses the cluster's default storage class.
+  storageClassName: ""
+
+# Non-secret environment, rendered into a ConfigMap.
+env:
+  BLUEPRINT_SERVER: https://blueprint.example.com
+  BLUEPRINT_REPO_URL: https://github.com/your-org/your-repo.git
+  # The branch Steward's own clone tracks; empty is the remote's default branch. Jobs carry their own branch.
+  BLUEPRINT_STEWARD_REF: ""
+  BLUEPRINT_MERGE_POLL_SECONDS: "120"
+  GIT_AUTHOR_NAME: Blueprint Steward
+  GIT_AUTHOR_EMAIL: steward@blueprint.local
+
+# The Secret Steward reads its keys from, as environment variables:
+#   BLUEPRINT_STEWARD_TOKEN    your organization's Blueprint API key (the Blueprint admin panel)
+#   GH_TOKEN                   fetch and push the served repository, and open pull requests
+#   CLAUDE_CODE_OAUTH_TOKEN    from `claude setup-token`; Steward never runs claude --bare
+#   BLUEPRINT_JIRA_BASE_URL, BLUEPRINT_JIRA_EMAIL, BLUEPRINT_JIRA_API_TOKEN
+#                              all three, or Steward claims no tracker jobs
+#   BLUEPRINT_ROUTINE_<ALIAS>_URL, BLUEPRINT_ROUTINE_<ALIAS>_TOKEN
+#                              optional, one pair per implementation routine alias
+# Create it yourself (kubectl create secret generic blueprint-steward --from-env-file=...) and name it here,
+# or let externalSecret below create it.
+secretName: blueprint-steward
+
+# Optional: an External Secrets Operator ExternalSecret that creates secretName from your secret store.
+externalSecret:
+  enabled: false
+  refreshInterval: 1h
+  storeRef:
+    name: your-cluster-secret-store
+    kind: ClusterSecretStore
+  # The entry in your store holding the keys above as properties.
+  remoteKey: blueprint-steward
+  keys:
+    - secretKey: BLUEPRINT_STEWARD_TOKEN
+    - secretKey: GH_TOKEN
+    - secretKey: CLAUDE_CODE_OAUTH_TOKEN
+    - secretKey: BLUEPRINT_JIRA_BASE_URL
+    - secretKey: BLUEPRINT_JIRA_EMAIL
+    - secretKey: BLUEPRINT_JIRA_API_TOKEN
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

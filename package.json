@@ -1,0 +1,32 @@
+{
+  "name": "blueprint-steward-monorepo",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agilityio-us/blueprint-steward"
+  },
+  "homepage": "https://github.com/agilityio-us/blueprint-steward#readme",
+  "bugs": {
+    "url": "https://github.com/agilityio-us/blueprint-steward/issues"
+  },
+  "type": "module",
+  "workspaces": [
+    "packages/spec",
+    "packages/steward"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p packages/steward/mcp/tsconfig.json",
+    "build": "npm run build --workspace @bett3r-dev/blueprint-steward"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.28.2",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

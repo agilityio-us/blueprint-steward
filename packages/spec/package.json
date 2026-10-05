@@ -1,0 +1,31 @@
+{
+  "name": "@bett3r-dev/blueprint-spec",
+  "version": "0.1.0",
+  "description": "What the Blueprint server and Steward agree on: routes, job kinds and steps, report reasons, signals and exit codes.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agilityio-us/blueprint-steward",
+    "directory": "packages/spec"
+  },
+  "homepage": "https://github.com/agilityio-us/blueprint-steward/tree/main/packages/spec#readme",
+  "bugs": {
+    "url": "https://github.com/agilityio-us/blueprint-steward/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@bett3r-dev/blueprint-schema": "^1.7.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
