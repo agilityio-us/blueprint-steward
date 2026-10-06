@@ -219,6 +219,23 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     expect( r.stdout ).not.toContain( '"type":"assistant"' );
   } );
 
+  it( 'start --once against a server that serves only the legacy runner routes: the first steward call answered 404 with no refusal of its own is made again under /api/blueprint/runner, as is every later one', async () => {
+    const host = await fakeHost( ( req ) => {
+      if ( req.url.startsWith( '/api/blueprint/steward/' ) ) return { status: 404, body: { error: { code: 'NOT_FOUND', message: 'no route' } } };
+      return req.url === '/api/blueprint/runner/claim'
+        ? { body: { job: { id: 'j9', kind: 'design', sessionId: 'sess-9', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-j9', instructions: SERVED, method: METHOD, ...TOOLS } } }
+        : {};
+    } );
+    const claude = makeFakeClaude( 0 );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
+    expect( r.code, r.stderr ).toBe( 0 );
+    expect( unstepped( host.requests ).map( ( q ) => q.url ) ).toEqual( [
+      '/api/blueprint/steward/claim', '/api/blueprint/runner/claim', '/api/blueprint/reality', '/api/blueprint/runner/jobs/j9',
+    ] );
+    expect( host.requests.filter( ( q ) => q.url.startsWith( '/api/blueprint/steward/' ) ) ).toHaveLength( 1 );
+    expect( unstepped( host.requests ).at( -1 )?.body.status ).toBe( 'done' );
+  } );
+
   it( 'start --once: claim, worktree, reality, agent in the session\'s worktree with mcp config, report done', async () => {
     const host = await jobHost();
     const repo = makeRepo();
@@ -1181,7 +1198,7 @@ describe( 'blueprint-steward start: per-session worktrees', () => {
         if ( job ) claimed.push( { id: String( job.id ), at: Date.now() } );
         return { body: { job } };
       }
-      const report = req.url.match( /^\/api\/blueprint\/runner\/jobs\/([^/]+)$/ );
+      const report = req.url.match( /^\/api\/blueprint\/steward\/jobs\/([^/]+)$/ );
       if ( report ) {
         reported.push( { id: report[ 1 ], body: req.body, at: Date.now(), worktreeExists: Object.fromEntries( Object.entries( watch ).map( ( [ name, dir ] ) => [ name, existsSync( dir ) ] ) ) } );
       }
@@ -1801,11 +1818,11 @@ process.exit( code );
         const waitFor = queue[ 0 ]?.waitFor;
         return { body: { job: typeof waitFor === 'string' && !existsSync( waitFor ) ? null : queue.shift() ?? null } };
       }
-      const hb = req.url.match( /^\/api\/blueprint\/runner\/jobs\/([^/]+)\/heartbeat$/ );
+      const hb = req.url.match( /^\/api\/blueprint\/steward\/jobs\/([^/]+)\/heartbeat$/ );
       if ( hb ) { heartbeats.push( { id: hb[ 1 ], t: Date.now() } ); return {}; }
       if ( req.url.endsWith( '/bundle' ) ) return { body: more.bundle };
       if ( req.url.startsWith( '/api/blueprint/branches?' ) ) return { body: { branches: more.branches ?? [] } };
-      const report = req.url.match( /^\/api\/blueprint\/runner\/jobs\/([^/]+)$/ );
+      const report = req.url.match( /^\/api\/blueprint\/steward\/jobs\/([^/]+)$/ );
       if ( report ) reported.push( { id: report[ 1 ], body: req.body, t: Date.now() } );
       return {};
     } );

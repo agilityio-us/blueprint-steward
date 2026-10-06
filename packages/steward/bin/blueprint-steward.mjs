@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import {
   BRANCH_CLOSED_ROUTE, BRANCH_DELETED_ROUTE, BRANCH_MERGED_ROUTE, BRANCHES_ROUTE, legacyRouteOf, REALITY_PUSH_ROUTE,
   RUNNER_HEARTBEAT_MAX_SECONDS, RUNNER_JOB_ACTIVITY_SEGMENT, RUNNER_JOB_BUNDLE_SEGMENT, RUNNER_JOB_HEARTBEAT_SEGMENT,
-  RUNNER_JOB_KINDS, RUNNER_JOB_METHOD_SEGMENT, RUNNER_JOB_NOT_CLAIMED, STEWARD_CLAIM_ROUTE, STEWARD_JOBS_ROUTE, stewardJobRoute,
+  RUNNER_JOB_KINDS, RUNNER_JOB_METHOD_SEGMENT, RUNNER_JOB_NOT_CLAIMED, STEWARD_CLAIM_ROUTE, STEWARD_JOBS_ROUTE, STEWARD_SIGNALS_ROUTE,
+  stewardJobRoute,
 } from '@bett3r-dev/blueprint-spec';
 import { activityOf, createActivityRelay, lineSplitter, logLinesOf } from '../lib/activity.mjs';
 import { holdSecret, runQueued, setChildTimeout, spawnChild } from '../lib/child.mjs';
@@ -183,10 +184,12 @@ const gitIn = async ( cwd, cmd ) => {
 };
 const git = ( cmd ) => gitIn( repo, cmd );
 
-// The job, claim and signal routes are spelled under /api/blueprint/steward. A server that answers one of them 404 with
-// no refusal of its own serves only their legacy /api/blueprint/runner spelling, which is called from then on, that
-// call first.
+// The job, claim and signal routes are spelled under /api/blueprint/steward. A server that answers the claim, the
+// enqueue or a signal report 404 with no refusal of its own serves only their legacy /api/blueprint/runner spelling,
+// which is called from then on, that call first. A job's own routes are reached only after its claim settled the
+// spelling, so their 404s are the server's answers about the job.
 const ROUTE_REFUSALS = new Set( [ RUNNER_JOB_NOT_CLAIMED, 'SESSION_NOT_FOUND' ] );
+const SPELLING_ROUTES = new Set( [ STEWARD_CLAIM_ROUTE, STEWARD_JOBS_ROUTE, STEWARD_SIGNALS_ROUTE ] );
 let legacyRoutes = false;
 const spelled = ( route ) => ( legacyRoutes ? legacyRouteOf( route ) ?? route : route );
 const call = async ( stewardRoute, body, { method = 'POST', sessionId } = {} ) => {
@@ -205,7 +208,7 @@ const call = async ( stewardRoute, body, { method = 'POST', sessionId } = {} ) =
     // The host's refusal code ({ error: { code } }), when its body carries one, so a caller can tell refusals apart.
     let code;
     try { code = JSON.parse( text )?.error?.code; } catch { code = undefined; }
-    if ( response.status === 404 && !ROUTE_REFUSALS.has( code ) && route === stewardRoute && legacyRouteOf( route ) !== undefined ) {
+    if ( response.status === 404 && !ROUTE_REFUSALS.has( code ) && route === stewardRoute && SPELLING_ROUTES.has( route ) ) {
       legacyRoutes = true;
       console.error( `blueprint-steward: the server does not serve ${ route }; calling ${ legacyRouteOf( route ) } from now on` );
       return call( stewardRoute, body, { method, sessionId } );

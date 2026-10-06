@@ -13,8 +13,8 @@ export const sha256Of = ( bytes: Buffer ): string => createHash( 'sha256' ).upda
 /** The `method` a design claim carries: the plugin's name, version label, sha256, entry. */
 export const METHOD = { name: 'blueprint-method', version: '0.1.0', sha256: sha256Of( METHOD_ZIP ), entry: 'turn' };
 
-/** The job-scoped route Steward downloads the zip from (RUNNER_JOB_METHOD_SEGMENT beneath RUNNER_JOBS_ROUTE). */
-export const METHOD_ROUTE = /^\/api\/blueprint\/runner\/jobs\/[^/]+\/method$/;
+/** The job-scoped route Steward downloads the zip from (RUNNER_JOB_METHOD_SEGMENT beneath STEWARD_JOBS_ROUTE, or its legacy spelling). */
+export const METHOD_ROUTE = /^\/api\/blueprint\/(?:steward|runner)\/jobs\/[^/]+\/method$/;
 
 /**
  * Live captures of `claude -p --output-format stream-json --verbose` from Claude Code 2.1.287 (macOS, 2026-10-03,
