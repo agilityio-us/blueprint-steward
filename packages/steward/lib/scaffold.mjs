@@ -3,7 +3,10 @@
 // committed <root>/<KEY>/scaffold.json lists that is still blob-identical to what was created (an edited one is kept
 // and reported), runs the repository's designTooling.scaffold with --write --json, --design and --map on the bundle
 // (so agreed scenarios become it.todo tests), and commits what it wrote, its barrel appends and the new scaffold.json
-// by plumbing on that sha, fast-forward only. No model runs and no test runs: this module starts git and the declared
+// by plumbing on that sha, fast-forward only. Every run that reaches the commit makes one, under the trailer
+// `Blueprint-Scaffold: <KEY>`, so the latest such commit on the branch is the scaffold in force: one with nothing to
+// write commits scaffold.json alone, and a repository that declares no scaffold command commits a scaffold.json whose
+// status is skipped. No model runs and no test runs: this module starts git and the declared
 // scaffold command, and calls the `extract` it is handed (Steward's extractIn, which runs the declared extract
 // command and, when that fails in a worktree with no node_modules, one install without build scripts). Exit 3
 // (SCAFFOLD_EXIT_BLOCKED) commits and reports blocked; any other non-zero exit fails.
@@ -11,24 +14,21 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, posix } from 'node:path';
-import { SCAFFOLD_EXIT_BLOCKED, SCAFFOLD_EXIT_OK } from '@bett3r-dev/blueprint-spec';
+import { BLUEPRINT_CONFIG_FILE, SCAFFOLD_EXIT_BLOCKED, SCAFFOLD_EXIT_OK, SCAFFOLD_REPORT_FILE, SCAFFOLD_TRAILER } from '@bett3r-dev/blueprint-spec';
 import { runChild } from './child.mjs';
 import { bundleDirAt, gitFailure, gitOut, KEY_SEGMENT, remoteTip } from './flush.mjs';
 
 export const SCAFFOLD_JOB_KIND = 'scaffold';
 /** The report's file name, written one level above the bundle (<root>/<KEY>/). */
-export const SCAFFOLD_REPORT = 'scaffold.json';
+export const SCAFFOLD_REPORT = SCAFFOLD_REPORT_FILE;
 /** The scaffold command's exit codes that commit: done, and blocked. */
 const EXIT_OK = SCAFFOLD_EXIT_OK;
 const EXIT_BLOCKED = SCAFFOLD_EXIT_BLOCKED;
 /** How much of a failed scaffolder's stderr the report carries: its tail. */
 const STDERR_TAIL = 2048;
-const CONFIG = '.blueprint.config.json';
+const CONFIG = BLUEPRINT_CONFIG_FILE;
 // The fragment artifacts the report lists as topology: a worklist entry, owed as not-placed.
 const TOPOLOGY = [ 'command', 'event', 'invariant' ];
-// What a re-run recomputes from a tree that already holds the scaffold, left out when
-// the new report is compared with the committed one.
-const VOLATILE = [ 'baseSha', 'scaffolder', 'worklist', 'typecheck' ];
 const SHA = /^[0-9a-f]{40}$/;
 
 const failed = ( error, detail, reason ) => ( { ok: false, ...( reason ? { reason } : {} ), result: JSON.stringify( { error, ...detail } ) } );
@@ -51,12 +51,8 @@ const sortKeys = ( value ) => Array.isArray( value ) ? value.map( sortKeys )
   : value !== null && typeof value === 'object' ? Object.fromEntries( Object.keys( value ).sort().map( ( k ) => [ k, sortKeys( value[ k ] ) ] ) )
     : value;
 const reportText = ( report ) => `${ JSON.stringify( sortKeys( report ), null, 2 ) }\n`;
-const comparable = ( report ) => {
-  if ( report === null || typeof report !== 'object' ) return undefined;
-  const kept = Object.fromEntries( Object.entries( report ).filter( ( [ key ] ) => !VOLATILE.includes( key ) ) );
-  const { graph: _graph, ...inputs } = report.inputs ?? {};
-  return JSON.stringify( sortKeys( { ...kept, inputs } ) );
-};
+/** The scaffold commit's message: its subject and the trailer naming the item. */
+export const scaffoldMessage = ( key ) => `chore(${ key }): scaffold the agreed design\n\n${ SCAFFOLD_TRAILER }: ${ key }\n`;
 const digest = async ( file ) => `sha256:${ createHash( 'sha256' ).update( await readFile( file ) ).digest( 'hex' ) }`;
 
 // Removes `rel`'s now-empty parent directories, up to the repository root.
@@ -120,13 +116,15 @@ const scaffoldCommitOf = async ( git, dir, tip, sha, reportPath ) => {
   try { report = JSON.parse( shown.stdout ); } catch { return undefined; }
   if ( report?.baseSha !== sha ) return undefined;
   const result = report.scaffolder ?? {};
-  // The scaffolder's EXIT_BLOCKED condition, read back from the scaffolder's report the commit carries: its --json output has no
-  // scenarios.decisions, so a scenario test with outcome `decision` (as classify reads it) stands in for that half.
+  // The status the report states; a report without one (an older Steward's) is read back from the scaffolder's report it
+  // carries: its --json output has no scenarios.decisions, so a scenario test with outcome `decision` (as classify reads
+  // it) stands in for that half of EXIT_BLOCKED.
   const blocked = ( result.skipped ?? [] ).some( ( s ) => s?.reason === 'blocked' || s?.reason === 'error' )
     || ( result.scenarioTests ?? [] ).some( ( t ) => t?.outcome === 'decision' );
+  const outcome = [ 'done', 'blocked', 'skipped' ].includes( report.status ) ? report.status : blocked ? 'blocked' : 'done';
   const changed = await gitOut( git, dir, [ 'diff-tree', '--no-commit-id', '-r', '--name-only', sha, tip ] );
   return {
-    outcome: blocked ? 'blocked' : 'done', committed: true, commitSha: tip, resumed: true, report: reportPath,
+    outcome, committed: true, commitSha: tip, resumed: true, report: reportPath,
     written: changed.split( '\n' ).filter( ( p ) => p !== '' && p !== reportPath && !( report.stale ?? [] ).some( ( s ) => s?.file === p ) ),
     deleted: ( report.stale ?? [] ).map( ( s ) => s.file ), edited: ( report.edited ?? [] ).map( ( e ) => e.file ),
     held: report.held ?? [], asked: report.asked ?? [], stillOwed: report.stillOwed ?? [], deferred: result.deferred ?? [],
@@ -158,8 +156,9 @@ const classify = ( result ) => {
 /**
  * Runs one scaffold job in `dir` (the session's worktree) for `payload` { sha, key, design?, map? } on origin's
  * `branch`, and answers the outcome Steward reports: done with { outcome: done | blocked, committed, commitSha,
- * report, written, deleted, edited, held, asked, stillOwed, deferred }, done with { outcome: skipped, committed: false,
- * commitSha, detail } when no scaffold command is declared, or failed with { error, ... }. When origin's tip is already
+ * report, written, deleted, edited, held, asked, stillOwed, deferred }, done with { outcome: skipped, committed: true,
+ * commitSha, report, detail } when no scaffold command is declared, or failed with { error, ... }. scaffold.json's
+ * `status` is the outcome. When origin's tip is already
  * this sha's scaffold commit (a re-run after a push that landed unreported), done with { outcome, committed: true,
  * commitSha: that commit, resumed: true, ... } read back from the report it carries. `design` and `map` default
  * to the bundle's design.json and map.json at `sha`.
@@ -188,9 +187,6 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
     return failed( 'config-invalid', { detail: `${ CONFIG } at ${ sha } is not JSON` }, 'config-invalid' );
   }
   const command = typeof tooling.scaffold === 'string' && tooling.scaffold.trim() !== '' ? tooling.scaffold : undefined;
-  if ( command === undefined ) {
-    return done( { outcome: 'skipped', committed: false, commitSha: sha, detail: `no designTooling.scaffold in ${ CONFIG } at ${ sha }` } );
-  }
   const at = await bundleDirAt( git, dir, sha, key );
   if ( at.error !== undefined ) return failed( 'config-invalid', { detail: at.error }, 'config-invalid' );
   const docsDir = posix.dirname( at.path );
@@ -200,6 +196,12 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
     const resumed = await scaffoldCommitOf( git, dir, tip, sha, reportPath );
     if ( resumed !== undefined ) return done( resumed );
     return failed( 'non-ff', { detail: `origin's ${ branch } is at ${ tip }, not at the payload's sha ${ sha }; the scaffold commit is fast-forward only` }, 'non-ff' );
+  }
+  if ( command === undefined ) {
+    const detail = `no designTooling.scaffold in ${ CONFIG } at ${ sha }`;
+    const report = { version: 1, status: 'skipped', ticket: key, baseSha: sha, detail };
+    const pushed = await commitReport( { git, dir, branch, sha, key, reportPath, report } );
+    return pushed.failure ?? done( { outcome: 'skipped', committed: true, commitSha: pushed.commit, report: reportPath, detail } );
   }
   const designPath = insideRepo( payload.design ?? `${ at.path }/design.json` );
   const mapPath = insideRepo( payload.map ?? `${ at.path }/map.json` );
@@ -282,8 +284,9 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
   const blobs = {};
   for ( const path of committed ) blobs[ path ] = await gitOut( git, dir, [ 'hash-object', '-w', '--', path ] );
   const { asked, owed, worklist } = classify( result );
+  const outcome = ran.status === EXIT_BLOCKED ? 'blocked' : 'done';
   const report = {
-    version: 1, mode: 'hosted-cli', ticket: key, baseSha: sha,
+    version: 1, status: outcome, mode: 'hosted-cli', ticket: key, baseSha: sha,
     inputs: { maps: [ { file: mapPath, digest: await digest( join( dir, mapPath ) ) } ], design: await digest( join( dir, designPath ) ), graph: await digest( join( dir, '.blueprint', 'graph.json' ) ).catch( () => null ) },
     created: byKey( created, 'file' ), appended,
     manifest: byKey( [ ...created.filter( ( c ) => blobs[ c.file ] !== undefined ).map( ( c ) => ( { file: c.file, node: c.node, blob: blobs[ c.file ] } ) ), ...carried ], 'file' ),
@@ -295,14 +298,12 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
 
   // A temporary index from `sha`'s tree: the deleted stubs out, the written files in. Nothing else moves.
   const scratch = await mkdtemp( join( tmpdir(), 'blueprint-scaffold-' ) );
-  let codeTree;
   let tree;
   try {
     const env = { GIT_INDEX_FILE: join( scratch, 'index' ) };
     await gitOut( git, dir, [ 'read-tree', `${ sha }^{tree}` ], { env } );
     for ( const d of stale ) await gitOut( git, dir, [ 'update-index', '--force-remove', '--', d.file ], { env } );
     for ( const path of committed ) await gitOut( git, dir, [ 'update-index', '--add', '--cacheinfo', `100644,${ blobs[ path ] },${ path }` ], { env } );
-    codeTree = await gitOut( git, dir, [ 'write-tree' ], { env } );
     const reportBlob = await gitOut( git, dir, [ 'hash-object', '-w', '--stdin' ], { input: reportText( report ) } );
     await gitOut( git, dir, [ 'update-index', '--add', '--cacheinfo', `100644,${ reportBlob },${ reportPath }` ], { env } );
     tree = await gitOut( git, dir, [ 'write-tree' ], { env } );
@@ -310,26 +311,41 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
     await rm( scratch, { recursive: true, force: true } );
   }
 
-  const outcome = ran.status === EXIT_BLOCKED ? 'blocked' : 'done';
   const summary = {
     outcome, report: reportPath, written: committed, deleted: stale.map( ( d ) => d.file ), edited: edited.map( ( e ) => e.file ),
     held: report.held, asked, stillOwed: owed, deferred: result.deferred ?? [], ...( ignored.length > 0 ? { ignored } : {} ),
   };
-  // Nothing written and nothing deleted, and a report that says what the committed one says: no commit.
-  const codeUnchanged = codeTree === await gitOut( git, dir, [ 'rev-parse', `${ sha }^{tree}` ] );
-  if ( codeUnchanged && ( prior === null || comparable( prior ) === comparable( report ) ) ) {
-    return done( { ...summary, committed: false, commitSha: sha } );
-  }
-  const commit = await gitOut( git, dir, [ 'commit-tree', tree, '-p', sha, '-F', '-' ], { input: `chore(${ key }): scaffold the agreed design\n` } );
+  // Always a commit, even one that changes only scaffold.json: the latest scaffold commit is the one in force.
+  const pushed = await pushScaffold( { git, dir, branch, sha, key, tree } );
+  return pushed.failure ?? done( { ...summary, committed: true, commitSha: pushed.commit } );
+};
+
+// The scaffold commit of `tree` on `sha`, pushed to origin's branch fast-forward only: { commit }, or { failure }.
+const pushScaffold = async ( { git, dir, branch, sha, key, tree } ) => {
+  const commit = await gitOut( git, dir, [ 'commit-tree', tree, '-p', sha, '-F', '-' ], { input: scaffoldMessage( key ) } );
   // Fast-forward only: the push names the commit and the branch, and is never forced.
   const pushed = await git( dir, [ 'push', '--quiet', 'origin', `${ commit }:refs/heads/${ branch }` ] );
-  if ( pushed.status !== 0 ) {
-    const now = await remoteTip( git, dir, branch );
-    // A push that landed and then exited non-zero (the connection dropped after the ref moved) is done.
-    if ( now.tip !== commit ) {
-      if ( now.missing ) return failed( 'branch-missing', { detail: `origin's branch ${ branch } was deleted during the scaffold` }, 'branch-missing' );
-      return failed( now.tip === sha ? 'push-rejected' : 'non-ff', { detail: gitFailure( pushed ) }, now.tip === sha ? 'push-rejected' : 'non-ff' );
-    }
+  if ( pushed.status === 0 ) return { commit };
+  const now = await remoteTip( git, dir, branch );
+  // A push that landed and then exited non-zero (the connection dropped after the ref moved) is done.
+  if ( now.tip === commit ) return { commit };
+  if ( now.missing ) return { failure: failed( 'branch-missing', { detail: `origin's branch ${ branch } was deleted during the scaffold` }, 'branch-missing' ) };
+  const reason = now.tip === sha ? 'push-rejected' : 'non-ff';
+  return { failure: failed( reason, { detail: gitFailure( pushed ) }, reason ) };
+};
+
+// The scaffold commit of `sha`'s tree with `report` alone written at `reportPath`, pushed as pushScaffold does.
+const commitReport = async ( { git, dir, branch, sha, key, reportPath, report } ) => {
+  const scratch = await mkdtemp( join( tmpdir(), 'blueprint-scaffold-' ) );
+  let tree;
+  try {
+    const env = { GIT_INDEX_FILE: join( scratch, 'index' ) };
+    await gitOut( git, dir, [ 'read-tree', `${ sha }^{tree}` ], { env } );
+    const reportBlob = await gitOut( git, dir, [ 'hash-object', '-w', '--stdin' ], { input: reportText( report ) } );
+    await gitOut( git, dir, [ 'update-index', '--add', '--cacheinfo', `100644,${ reportBlob },${ reportPath }` ], { env } );
+    tree = await gitOut( git, dir, [ 'write-tree' ], { env } );
+  } finally {
+    await rm( scratch, { recursive: true, force: true } );
   }
-  return done( { ...summary, committed: true, commitSha: commit } );
+  return pushScaffold( { git, dir, branch, sha, key, tree } );
 };

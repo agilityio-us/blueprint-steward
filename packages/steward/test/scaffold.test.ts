@@ -218,6 +218,7 @@ const scaffoldAt = async ( fx: Fixture, sha: string ) => {
   try { result = JSON.parse( String( result ) ); } catch { /* kept as text, so an assertion prints it */ }
   return { status: report?.body?.status, reason: report?.body?.reason, result: result as Record<string, unknown>, stderr: ran.stderr, host };
 };
+const messageOf = ( fx: Fixture, rev: string ) => sh( fx.origin, `git log -1 --format=%B ${ rev }` ).trim();
 const reportAt = ( fx: Fixture, rev: string ) => JSON.parse( showAt( fx, rev, REPORT ) ?? 'null' ) as Record<string, unknown> | null;
 
 const EVENT_STUB = ( name: string ) => `// scaffolded\nexport const ${ name } = 'TODO';\n`;
@@ -265,8 +266,9 @@ describe( 'blueprint-steward scaffold job', () => {
     expect( [ existsSync( join( fx.worktree, 'stray.txt' ) ), existsSync( join( fx.worktree, 'src', 'orders', 'Stray.ts' ) ) ] ).toEqual( [ false, false ] );
     // The report, mode hosted-cli: the manifest's blobs are the created files' git blob shas.
     const report = reportAt( fx, tip );
+    expect( messageOf( fx, tip ) ).toBe( `chore(${ KEY }): scaffold the agreed design\n\nBlueprint-Scaffold: ${ KEY }` );
     expect( report ).toMatchObject( {
-      version: 1, mode: 'hosted-cli', ticket: KEY, baseSha: sha1,
+      version: 1, status: 'done', mode: 'hosted-cli', ticket: KEY, baseSha: sha1,
       created: [ { file: DOC_NOTE, node: 'n1' }, { file: PLACED, node: 'e1' }, { file: PLACED_TEST, node: 't1' } ],
       appended: [ { kind: 'barrel', file: BARREL, node: 'e1', code: PLACED_LINE } ],
       manifest: [ { file: PLACED, node: 'e1', blob: blobOf( EVENT_STUB( 'OrderPlaced' ) ) }, { file: PLACED_TEST, node: 't1', blob: blobOf( TODO_TEST ) } ],
@@ -325,7 +327,7 @@ describe( 'blueprint-steward scaffold job', () => {
     } );
   }, 120_000 );
 
-  it( 'Given an unchanged design, when the scaffold job runs again at the next base commit, then nothing is committed and origin\'s tip is unmoved', async () => {
+  it( 'Given an unchanged design, when the scaffold job runs again at the next base commit, then a scaffold commit lands anyway, changing only scaffold.json, so the latest scaffold commit is the one in force', async () => {
     // GIVEN
     const fx = makeFixture();
     writePlan( fx, FIRST_PLAN );
@@ -336,18 +338,24 @@ describe( 'blueprint-steward scaffold job', () => {
     const outcome = await scaffoldAt( fx, sha1 );
 
     // THEN
-    expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha, tip: originTip( fx ) } )
-      .toEqual( { status: 'done', outcome: 'done', committed: false, commitSha: sha1, tip: sha1 } );
+    const tip = originTip( fx );
+    expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha, parent: sh( fx.origin, `git rev-parse ${ tip }^` ) } )
+      .toEqual( { status: 'done', outcome: 'done', committed: true, commitSha: tip, parent: sha1 } );
+    expect( changesOf( fx, tip ) ).toEqual( [ `M\t${ REPORT }` ] );
+    expect( [ messageOf( fx, tip ), reportAt( fx, tip )?.baseSha ] ).toEqual( [ `chore(${ KEY }): scaffold the agreed design\n\nBlueprint-Scaffold: ${ KEY }`, sha1 ] );
   }, 120_000 );
 
-  it( 'Given a scaffolder that writes nothing on a branch with no scaffold.json, when the job runs, then nothing is committed', async () => {
+  it( 'Given a scaffolder that writes nothing on a branch with no scaffold.json, when the job runs, then the scaffold commit holds scaffold.json alone, status done', async () => {
     const fx = makeFixture();
     const sha1 = originTip( fx );
     writePlan( fx, {} );
 
     const outcome = await scaffoldAt( fx, sha1 );
 
-    expect( { status: outcome.status, committed: outcome.result?.committed, tip: originTip( fx ) } ).toEqual( { status: 'done', committed: false, tip: sha1 } );
+    const tip = originTip( fx );
+    expect( { status: outcome.status, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha } ).toEqual( { status: 'done', committed: true, commitSha: tip } );
+    expect( changesOf( fx, tip ) ).toEqual( [ `A\t${ REPORT }` ] );
+    expect( reportAt( fx, tip ) ).toMatchObject( { status: 'done', baseSha: sha1 } );
   }, 120_000 );
 
   it( 'Given the fake scaffolder writes files and exits 3, when the job runs, then the files are committed and the report says blocked', async () => {
@@ -365,7 +373,7 @@ describe( 'blueprint-steward scaffold job', () => {
     expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha } )
       .toEqual( { status: 'done', outcome: 'blocked', committed: true, commitSha: tip } );
     expect( changesOf( fx, tip ) ).toEqual( [ `A\t${ REPORT }`, `A\t${ PLACED }`, `A\t${ PLACED_TEST }`, `M\t${ BARREL }` ] );
-    expect( reportAt( fx, tip ) ).toMatchObject( { asked: [ { node: 'p1', question: question.question } ] } );
+    expect( reportAt( fx, tip ) ).toMatchObject( { status: 'blocked', asked: [ { node: 'p1', question: question.question } ] } );
   }, 120_000 );
 
   it( 'Given the scaffolder exits 1, when the job runs, then the job fails and origin\'s tip is unmoved', async () => {
@@ -379,15 +387,24 @@ describe( 'blueprint-steward scaffold job', () => {
     expect( outcome.result ).toMatchObject( { error: 'scaffold-failed', exitCode: 1 } );
   }, 120_000 );
 
-  it( 'Given .blueprint.config.json has no designTooling.scaffold, when the job runs, then it reports skipped and the branch tip is unmoved', async () => {
+  it( 'Given .blueprint.config.json has no designTooling.scaffold, when the job runs, then nothing runs and the scaffold commit holds a scaffold.json whose status is skipped; run again, it resumes that commit', async () => {
     const fx = makeFixture( { scaffold: false } );
     const sha1 = originTip( fx );
     writePlan( fx, FIRST_PLAN );
 
     const outcome = await scaffoldAt( fx, sha1 );
 
-    expect( { status: outcome.status, outcome: outcome.result?.outcome, tip: originTip( fx ), ran: argvLog( fx ) } )
-      .toEqual( { status: 'done', outcome: 'skipped', tip: sha1, ran: [] } );
+    const tip = originTip( fx );
+    expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha, ran: argvLog( fx ) } )
+      .toEqual( { status: 'done', outcome: 'skipped', committed: true, commitSha: tip, ran: [] } );
+    expect( sh( fx.origin, `git rev-parse ${ tip }^` ) ).toBe( sha1 );
+    expect( changesOf( fx, tip ) ).toEqual( [ `A\t${ REPORT }` ] );
+    expect( messageOf( fx, tip ) ).toBe( `chore(${ KEY }): scaffold the agreed design\n\nBlueprint-Scaffold: ${ KEY }` );
+    expect( reportAt( fx, tip ) ).toMatchObject( { version: 1, status: 'skipped', ticket: KEY, baseSha: sha1 } );
+
+    const again = await scaffoldAt( fx, sha1 );
+    expect( { outcome: again.result?.outcome, commitSha: again.result?.commitSha, resumed: again.result?.resumed, tip: originTip( fx ) } )
+      .toEqual( { outcome: 'skipped', commitSha: tip, resumed: true, tip } );
   }, 120_000 );
 
   it( 'Given the developer pushed onto the branch after the base commit, when the scaffold job for it runs, then it fails non-ff, never runs the scaffolder and leaves origin\'s tip where the developer put it', async () => {
