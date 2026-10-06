@@ -13,15 +13,16 @@ worktree of the clone, at `<clone>.blueprint-worktrees/<session id>`. The kinds 
 | - | - |
 | `design` | Brings the session's worktree to the job's branch, runs the repository's declared extractor (`designTooling.extract` in `.blueprint.config.json`), pushes the graph and diagnostics, downloads the method plugin the claim names and checks its sha256, then runs `claude -p` on the instructions the server serves, with `blueprint-mcp` pointed at the hosted session |
 | `flush` | Commits the session's bundle to the branch with git plumbing, fast-forward only, never forced |
-| `scaffold` | Runs the repository's declared scaffold command and commits what it wrote |
-| `ticket-branch`, `pr-ready` | Creates a ticket's branch on origin (optionally with a draft pull request), or takes the draft out of draft, through `gh` |
+| `scaffold` | Runs the repository's declared scaffold command and commits what it wrote, always as one commit with the trailer `Blueprint-Scaffold: <KEY>`, whose `<docsRoot>/<KEY>/scaffold.json` says `done`, `blocked` or `skipped` |
+| `ticket-branch`, `pr-ready` | Creates a ticket's branch on origin (optionally with a draft pull request), or sets the pull request's body from `<docsRoot>/<KEY>/pull-request.md` when the branch commits one and takes it out of draft, through `gh` |
 | `git-poll`, `drop-worktree` | One merge poll now; removes an idle session's worktree |
 | `tracker-poll`, `tracker-comment`, `tracker-transition`, `tracker-describe` | Reads and writes Jira, only with the whole Jira credential |
 | `observability-read` | Runs the repository's declared `observability.read` command for a KPI lookup (30 s each) |
 | `implementation-dispatch` | Fires a Claude routine for an alias it holds, with the text the server composed |
 
 Beside the claim loop, a merge poll (`--merge-poll`, 300 s by default) fetches, reports the server's branches that
-merged, closed or were deleted, and reads commit trailer signals off the branches the server lists.
+merged, closed or were deleted, and reads commit trailer signals off the branches the server lists and off their
+agent branches (`claude/<branch>`), merging an agent branch whose latest signal is `done` into its branch.
 
 `blueprint-steward push` extracts and pushes the graph once; `enqueue` queues a design job. `--help` lists every flag.
 
@@ -31,7 +32,8 @@ merged, closed or were deleted, and reads commit trailer signals off the branche
   worktrees beside it. Commits Steward makes itself (flush, scaffold, ticket branches, agent-branch merges) are made
   with plumbing and pushed without force.
 - **Commands your repository declares**, in `.blueprint.config.json`: the extractor, the scaffold command and the
-  observability reader. They run with your environment, minus Steward's own secrets.
+  observability reader. They run with your environment, minus Steward's own secrets. Its `docsRoot` (default
+  `docs/prs`) is where each item's folder, `<docsRoot>/<KEY>/`, lives.
 - **The design agent**: `claude -p`, started with only the tools the job names (`--tools`, `--allowedTools`),
   `--strict-mcp-config`, `--setting-sources project` and no session kept on disk. `--tool-ceiling` caps the tools any
   job may ask for. The agent's MCP server writes with a key the server minted for that job alone, never the org key.
@@ -93,8 +95,21 @@ its dependencies through its package manager, reach whatever those commands reac
 
 Run one Steward per repository and organization: two share one job queue and one clone.
 
+## Implementation agents
+
+An `implementation-dispatch` job fires the alias's routine with the text the server composed: one JSON object,
+`FirePayload` in `@bett3r-dev/blueprint-spec`. It names the contract's `specification` (1), the item's `key` and
+`title`, its `branch` and the `agentBranch` (`claude/<branch>`) the agent alone pushes to, the `pullRequest`, the path
+of the `design` (`<docsRoot>/<KEY>/blueprint.md`), the `signal` trailer key, the `answer` to the agent's last
+`needs-human` (the tracker comments since, or null) and the `options` the alias's settings name.
+
+The agent signals with that trailer on its agent branch's commits, and the latest value is the item's state:
+`working`; `done`, on which Steward merges the agent branch, sets the pull request's body from
+`<docsRoot>/<KEY>/pull-request.md` and readies it; `needs-human`, whose commit's subject asks; `rejected` or `failed`,
+whose commit's body says why. The server moves the tracker item on each.
+
 ## Later renames
 
-The server's HTTP routes for Steward still say `runner` (`/api/blueprint/runner/claim`, `/runner/jobs/...`,
-`/runner/signals`), as does the claim's `runnerVersion` field and the usage report's `cost_source: 'runner-sdk'`.
-They change with the server, not here.
+Steward calls the server's routes under `/api/blueprint/steward/`, and under their former spelling,
+`/api/blueprint/runner/`, once the server answers that it serves no other. The claim's `runnerVersion` field and the
+usage report's `cost_source: 'runner-sdk'` still say `runner`; they change with the server, not here.
