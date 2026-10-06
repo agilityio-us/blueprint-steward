@@ -68,6 +68,12 @@ export type ToolText = {
 // --- Steward ---
 
 export declare const REALITY_PUSH_ROUTE: '/api/blueprint/reality';
+export declare const STEWARD_ROUTE_PREFIX: '/api/blueprint/steward';
+export declare const LEGACY_STEWARD_ROUTE_PREFIX: '/api/blueprint/runner';
+export declare const STEWARD_JOBS_ROUTE: '/api/blueprint/steward/jobs';
+export declare const STEWARD_CLAIM_ROUTE: '/api/blueprint/steward/claim';
+export declare const STEWARD_SIGNALS_ROUTE: '/api/blueprint/steward/signals';
+export declare function legacyRouteOf( route: string ): string | undefined;
 export declare const RUNNER_JOBS_ROUTE: '/api/blueprint/runner/jobs';
 export declare const RUNNER_CLAIM_ROUTE: '/api/blueprint/runner/claim';
 export declare const RUNNER_SIGNALS_ROUTE: '/api/blueprint/runner/signals';
@@ -79,6 +85,7 @@ export declare const RUNNER_JOB_HEARTBEAT_SEGMENT: 'heartbeat';
 export declare const RUNNER_JOB_BUNDLE_SEGMENT: 'bundle';
 export declare const RUNNER_JOB_METHOD_SEGMENT: 'method';
 export declare const RUNNER_JOB_ACTIVITY_SEGMENT: 'activity';
+export declare function stewardJobRoute( jobId: string, segment?: string ): string;
 export declare function runnerJobRoute( jobId: string, segment?: string ): string;
 export declare const RUNNER_JOB_NOT_CLAIMED: 'RUNNER_JOB_NOT_CLAIMED';
 
@@ -126,8 +133,55 @@ export declare const AGENT_BRANCH_PREFIX: 'claude/';
 export declare function agentBranchOf( ticketBranch: string ): string;
 export declare const SIGNAL_TRAILER_KEY_DEFAULT: 'Blueprint-Status';
 export declare const SIGNAL_TRAILER_KEY_PATTERN: RegExp;
+export declare const SIGNAL_WORKING: 'working';
 export declare const SIGNAL_DONE: 'done';
 export declare const SIGNAL_NEEDS_HUMAN: 'needs-human';
+export declare const SIGNAL_REJECTED: 'rejected';
+export declare const SIGNAL_FAILED: 'failed';
+export type SignalValue = 'working' | 'done' | 'needs-human' | 'rejected' | 'failed';
+export declare const SIGNAL_VALUES: readonly SignalValue[];
+
+/**
+ * A signal as Steward reports it to STEWARD_SIGNALS_ROUTE: the commit's sha, the trailer key it was read under, the
+ * value, the commit's subject, and its body without the trailer block (absent from a Steward older than 1.3.0).
+ */
+export type CommitSignal = { sha: string; key: string; value: string; subject: string; body?: string };
+
+// --- Specification v1 ---
+
+export declare const SPECIFICATION_VERSION: 1;
+export declare const DESIGN_SESSION_TRAILER: 'Blueprint-Session';
+export declare const DESIGN_SEQ_TRAILER: 'Blueprint-Seq';
+export declare const DESIGN_ACTORS_TRAILER: 'Blueprint-Actors';
+export declare const SCAFFOLD_TRAILER: 'Blueprint-Scaffold';
+export type ScaffoldStatus = 'done' | 'blocked' | 'skipped';
+export declare const SCAFFOLD_STATUSES: readonly ScaffoldStatus[];
+export declare const SCAFFOLD_GAP_MARKER: 'TODO(scaffold)';
+export declare const BLUEPRINT_CONFIG_FILE: '.blueprint.config.json';
+export declare const DOCS_ROOT_DEFAULT: 'docs/prs';
+export declare const DESIGN_FILE: 'blueprint.md';
+export declare const SCAFFOLD_REPORT_FILE: 'scaffold.json';
+export declare const PULL_REQUEST_FILE: 'pull-request.md';
+export declare function itemDocsPathOf( docsRoot: string, key: string, file?: string ): string;
+
+/**
+ * The text an implementation agent's routine is fired with, one JSON object. `branch` is the ticket branch and
+ * `agentBranch` the only branch the agent pushes; `design` is the path of the item's blueprint.md on `branch`; `signal`
+ * the trailer key the agent signals under; `answer` the reply to the agent's last needs-human, null for none; `options`
+ * what the agent's settings name, passed through untouched.
+ */
+export type FirePayload = {
+  specification: typeof SPECIFICATION_VERSION;
+  key: string;
+  title: string | null;
+  branch: string;
+  agentBranch: string;
+  pullRequest: string | null;
+  design: string;
+  signal: string;
+  answer: string | null;
+  options: Record<string, unknown>;
+};
 
 // --- Scaffold ---
 

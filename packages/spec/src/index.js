@@ -25,10 +25,22 @@ export const TOOL_TEXT_VERSION = 1;
 /** The route a KPI lookup posts to; the server holds it open while Steward answers an observability-read job. */
 export const observabilityReadRoute = ( sessionId ) => `/api/blueprint/sessions/${ encodeURIComponent( sessionId ) }/observability/read`;
 
-// --- Steward: the routes Steward polls and reports on. Their paths still say `runner`, the component's former name. ---
+// --- Steward: the routes Steward polls and reports on ---
 
 /** Where `push` sends the extracted graph and diagnostics. */
 export const REALITY_PUSH_ROUTE = '/api/blueprint/reality';
+/** The prefix of the job, claim and signal routes. */
+export const STEWARD_ROUTE_PREFIX = '/api/blueprint/steward';
+/** The same routes under the component's former name, which a server still serves, and the only ones an older one does. */
+export const LEGACY_STEWARD_ROUTE_PREFIX = '/api/blueprint/runner';
+export const STEWARD_JOBS_ROUTE = `${ STEWARD_ROUTE_PREFIX }/jobs`;
+export const STEWARD_CLAIM_ROUTE = `${ STEWARD_ROUTE_PREFIX }/claim`;
+export const STEWARD_SIGNALS_ROUTE = `${ STEWARD_ROUTE_PREFIX }/signals`;
+/** A route under STEWARD_ROUTE_PREFIX spelled under LEGACY_STEWARD_ROUTE_PREFIX; undefined for any other route. */
+export const legacyRouteOf = ( route ) => ( /^\/api\/blueprint\/steward(?=$|[/?])/.test( route )
+  ? `${ LEGACY_STEWARD_ROUTE_PREFIX }${ route.slice( STEWARD_ROUTE_PREFIX.length ) }`
+  : undefined );
+/** The legacy spellings of STEWARD_JOBS_ROUTE, STEWARD_CLAIM_ROUTE and STEWARD_SIGNALS_ROUTE. */
 export const RUNNER_JOBS_ROUTE = '/api/blueprint/runner/jobs';
 export const RUNNER_CLAIM_ROUTE = '/api/blueprint/runner/claim';
 export const RUNNER_SIGNALS_ROUTE = '/api/blueprint/runner/signals';
@@ -45,6 +57,8 @@ export const RUNNER_JOB_METHOD_SEGMENT = 'method';
 export const RUNNER_JOB_ACTIVITY_SEGMENT = 'activity';
 
 /** The route of a claimed job, or of one of its sub-routes. */
+export const stewardJobRoute = ( jobId, segment ) => `${ STEWARD_JOBS_ROUTE }/${ encodeURIComponent( jobId ) }${ segment === undefined ? '' : `/${ segment }` }`;
+/** stewardJobRoute's legacy spelling. */
 export const runnerJobRoute = ( jobId, segment ) => `${ RUNNER_JOBS_ROUTE }/${ encodeURIComponent( jobId ) }${ segment === undefined ? '' : `/${ segment }` }`;
 
 /** The refusal code of a heartbeat for a job the server no longer holds as claimed with a live lease. */
@@ -120,9 +134,42 @@ export const agentBranchOf = ( ticketBranch ) => `${ AGENT_BRANCH_PREFIX }${ tic
 export const SIGNAL_TRAILER_KEY_DEFAULT = 'Blueprint-Status';
 /** The form a trailer key takes; a key outside it is never read. */
 export const SIGNAL_TRAILER_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
-/** The signal values Steward acts on itself; any other value is only reported. */
+/**
+ * The signal values. The latest value on the agent branch is the item's state: `working` is a heartbeat; `done` has the
+ * agent branch merged and the pull request readied; `needs-human` asks, in its commit's subject, a question a tracker
+ * comment answers; `rejected` says, in its commit's body, why the design or scaffold cannot be delivered as given;
+ * `failed` says there why the agent could not run. Any other value is recorded and moves nothing.
+ */
+export const SIGNAL_WORKING = 'working';
 export const SIGNAL_DONE = 'done';
 export const SIGNAL_NEEDS_HUMAN = 'needs-human';
+export const SIGNAL_REJECTED = 'rejected';
+export const SIGNAL_FAILED = 'failed';
+export const SIGNAL_VALUES = Object.freeze( [ SIGNAL_WORKING, SIGNAL_DONE, SIGNAL_NEEDS_HUMAN, SIGNAL_REJECTED, SIGNAL_FAILED ] );
+
+// --- Specification v1: the fire an implementation agent starts from, and the files and trailers it works by ---
+
+/** The version of the contract a fire payload's `specification` names. */
+export const SPECIFICATION_VERSION = 1;
+/** The trailers of a design commit on the ticket branch. */
+export const DESIGN_SESSION_TRAILER = 'Blueprint-Session';
+export const DESIGN_SEQ_TRAILER = 'Blueprint-Seq';
+export const DESIGN_ACTORS_TRAILER = 'Blueprint-Actors';
+/** The trailer of a scaffold commit, valued with the item's key; the latest such commit on the ticket branch is in force. */
+export const SCAFFOLD_TRAILER = 'Blueprint-Scaffold';
+/** What scaffold.json's `status` says: the scaffold placed everything, could not place some of it, or did not run. */
+export const SCAFFOLD_STATUSES = Object.freeze( [ 'done', 'blocked', 'skipped' ] );
+/** The marker of a line the scaffold left for the agent to fill; every other line it added is the design's. */
+export const SCAFFOLD_GAP_MARKER = 'TODO(scaffold)';
+/** The repository's Blueprint config, and the docs root when it names none. */
+export const BLUEPRINT_CONFIG_FILE = '.blueprint.config.json';
+export const DOCS_ROOT_DEFAULT = 'docs/prs';
+/** The files of an item's folder, <docsRoot>/<KEY>/. */
+export const DESIGN_FILE = 'blueprint.md';
+export const SCAFFOLD_REPORT_FILE = 'scaffold.json';
+export const PULL_REQUEST_FILE = 'pull-request.md';
+/** An item's folder under a docs root, or one of its files. */
+export const itemDocsPathOf = ( docsRoot, key, file ) => `${ docsRoot }/${ key }${ file === undefined ? '' : `/${ file }` }`;
 
 // --- Scaffold: the exit codes of a repository's declared scaffold command ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@bett3r-dev/blueprint-spec",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "What the Blueprint server and Steward agree on: routes, job kinds and steps, report reasons, signals and exit codes.",
   "license": "MIT",
   "repository": {
