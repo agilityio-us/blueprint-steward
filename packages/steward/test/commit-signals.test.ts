@@ -467,12 +467,14 @@ const fakeGh = ( prs: Record<string, unknown>[] ) => {
     `(await import('node:fs')).appendFileSync(${ JSON.stringify( record ) }, JSON.stringify(argv) + '\\n');`,
     `if (argv[0] === 'pr' && argv[1] === 'list') console.log(${ JSON.stringify( JSON.stringify( prs ) ) });`,
     'else if (argv[0] === \'pr\' && argv[1] === \'ready\') console.log(`Pull request #${argv[2]} is marked as "ready for review"`);',
+    `else if (argv[0] === 'pr' && argv[1] === 'edit' && argv[3] === '--body-file') (await import('node:fs')).copyFileSync(argv[4], ${ JSON.stringify( `${ record }.body` ) });`,
     'else { console.error(`unexpected gh ${argv.join(\' \')}`); process.exit(1); }',
     '',
   ].join( '\n' ) );
   execSync( `chmod +x ${ gh }` );
   const calls = () => ( existsSync( record ) ? readFileSync( record, 'utf-8' ).trim().split( '\n' ).map( ( l ) => JSON.parse( l ) as string[] ) : [] );
-  return { gh, calls };
+  const body = () => ( existsSync( `${ record }.body` ) ? readFileSync( `${ record }.body`, 'utf-8' ) : undefined );
+  return { gh, calls, body };
 };
 const prReadyJob = { id: 'jp', kind: 'pr-ready', sessionId: 'sess-p', payload: { branch: 'P-1-checkout' } };
 const claimOnce = ( job: Record<string, unknown> ) => {
@@ -499,6 +501,42 @@ describe( 'blueprint-steward: pr-ready job', () => {
     const report = reportOf( host, 'jp' );
     expect( report?.status ).toBe( 'done' );
     expect( JSON.parse( report?.result ?? 'null' ) ).toEqual( { branch: 'P-1-checkout', state: 'ready', pr: 'https://github.example/o/r/pull/7' } );
+  } );
+
+  it( 'Given a pr-ready job naming the item whose branch tip commits its pull-request.md under the config\'s docsRoot, when Steward runs it, then the PR\'s body is set from that file before it is readied', async () => {
+    // GIVEN
+    const { dir } = makeRepo();
+    execSync( `git checkout -q -b P-1-checkout && mkdir -p design/P-1 && printf '%s' '{"docsRoot":"design"}' > .blueprint.config.json`, { cwd: dir, shell: '/bin/sh' } );
+    writeFileSync( join( dir, 'design', 'P-1', 'pull-request.md' ), '## One-step checkout\n\nExhibit: abc1234\n' );
+    execSync( `${ G } add -A && ${ G } commit -qm docs && git push -q origin P-1-checkout && git checkout -q main`, { cwd: dir } );
+    const { gh, calls, body } = fakeGh( [ { number: 7, isDraft: true, url: 'https://github.example/o/r/pull/7', headRefName: 'P-1-checkout' } ] );
+    const host = await fakeHost( claimOnce( { ...prReadyJob, payload: { branch: 'P-1-checkout', key: 'P-1' } } ) );
+
+    // WHEN
+    const r = await startOnce( host, dir, { BLUEPRINT_STEWARD_GH: gh, BLUEPRINT_GIT_HOST: 'github' } );
+
+    // THEN
+    expect( r.code, r.stderr ).toBe( 0 );
+    expect( calls().map( ( argv ) => argv.slice( 0, 3 ) ) ).toEqual( [ [ 'pr', 'list', '--head' ], [ 'pr', 'edit', '7' ], [ 'pr', 'ready', '7' ] ] );
+    expect( body() ).toBe( '## One-step checkout\n\nExhibit: abc1234\n' );
+    expect( JSON.parse( reportOf( host, 'jp' )?.result ?? 'null' ) ).toEqual( { branch: 'P-1-checkout', state: 'ready', pr: 'https://github.example/o/r/pull/7', body: 'set' } );
+  } );
+
+  it( 'Given a pr-ready job naming the item whose branch commits no pull-request.md, when Steward runs it, then the body is left as it is and the PR is readied', async () => {
+    // GIVEN
+    const { dir } = makeRepo();
+    commitOn( dir, 'P-1-checkout', 'feat: no description\n' );
+    const { gh, calls, body } = fakeGh( [ { number: 7, isDraft: true, url: 'https://github.example/o/r/pull/7', headRefName: 'P-1-checkout' } ] );
+    const host = await fakeHost( claimOnce( { ...prReadyJob, payload: { branch: 'P-1-checkout', key: 'P-1' } } ) );
+
+    // WHEN
+    const r = await startOnce( host, dir, { BLUEPRINT_STEWARD_GH: gh, BLUEPRINT_GIT_HOST: 'github' } );
+
+    // THEN
+    expect( r.code, r.stderr ).toBe( 0 );
+    expect( calls().filter( ( argv ) => argv[ 1 ] === 'edit' ) ).toEqual( [] );
+    expect( body() ).toBeUndefined();
+    expect( JSON.parse( reportOf( host, 'jp' )?.result ?? 'null' ) ).toMatchObject( { state: 'ready', body: 'absent' } );
   } );
 
   it( 'Given a pr-ready job for a branch with no PR, when Steward runs it, then it reports skipped and calls no gh pr ready', async () => {
