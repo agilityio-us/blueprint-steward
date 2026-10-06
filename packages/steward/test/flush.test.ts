@@ -243,7 +243,7 @@ describe( 'blueprint-steward flush', { timeout: 30_000 }, () => {
     expect( host.requests[ 1 ].headers[ 'x-blueprint-session-id' ] ).toBe( SESSION );
     expect( resultOf( host ) ).toEqual( {
       status: 'done', reason: undefined,
-      result: { commitSha: tip, headSeq: 3, blobShas: Object.fromEntries( Object.entries( bundleFiles() ).map( ( [ name, content ] ) => [ name, blobOf( content ) ] ) ) },
+      result: { commitSha: tip, headSeq: 3, docsRoot: 'docs/prs', blobShas: Object.fromEntries( Object.entries( bundleFiles() ).map( ( [ name, content ] ) => [ name, blobOf( content ) ] ) ) },
     } );
     // The message and trailers.
     expect( sh( fx.origin, `git log -1 --format=%s ${ tip }` ) ).toBe( `design(${ KEY }): session checkout redesign through seq 3` );
@@ -277,7 +277,7 @@ describe( 'blueprint-steward flush', { timeout: 30_000 }, () => {
     }
     expect( resultOf( host ) ).toEqual( {
       status: 'done', reason: undefined,
-      result: { commitSha: tip, headSeq: 3, blobShas: Object.fromEntries( Object.entries( files ).map( ( [ name, content ] ) => [ name, blobOf( content ) ] ) ) },
+      result: { commitSha: tip, headSeq: 3, docsRoot: 'docs/prs', blobShas: Object.fromEntries( Object.entries( files ).map( ( [ name, content ] ) => [ name, blobOf( content ) ] ) ) },
     } );
     // No map.html, here or anywhere the flush wrote.
     expect( sh( fx.origin, `git ls-tree -r --name-only ${ tip }` ).split( '\n' ).filter( ( path ) => path.endsWith( 'map.html' ) ) ).toEqual( [] );
@@ -501,6 +501,34 @@ describe( 'blueprint-steward flush', { timeout: 30_000 }, () => {
       .toEqual( [ 'board.json', 'design.json', 'manifest.json', 'map.json', 'ops.jsonl' ].map( ( name ) => `work/items/${ KEY }/blueprint/${ name }` ) );
 
     const invalid = withConfig( '../outside' );
+    const prior = originTip( invalid );
+    const refused = await fixtureHost( bundleFor( invalid ) );
+    await flush( refused, invalid );
+    expect( resultOf( refused ) ).toMatchObject( { status: 'failed', reason: 'config-invalid', result: { error: 'config-invalid' } } );
+    expect( originTip( invalid ) ).toBe( prior );
+  } );
+
+  it( 'Given the branch\'s .blueprint.config.json names docsRoot when the flush commits then the files land under it, over the legacy workflow config\'s workDocsRoot; an invalid one fails config-invalid', async () => {
+    const withConfigs = ( docsRoot: unknown, workDocsRoot?: string ) => {
+      const fx = makeFixture();
+      writeFileSync( join( fx.dev, '.blueprint.config.json' ), JSON.stringify( { designTooling: {}, ...( docsRoot === undefined ? {} : { docsRoot } ) } ) );
+      if ( workDocsRoot !== undefined ) {
+        mkdirSync( join( fx.dev, '.claude' ) );
+        writeFileSync( join( fx.dev, '.claude', 'bett3r-ai-workflow.json' ), JSON.stringify( { workDocsRoot } ) );
+      }
+      sh( fx.dev, `git add -A && git ${ IDENTITY } commit -qm config && git push -q origin ${ BRANCH }` );
+      return fx;
+    };
+    const landed = async ( fx: ReturnType<typeof makeFixture> ) => {
+      await flush( await fixtureHost( bundleFor( fx ) ), fx );
+      const tip = originTip( fx )!;
+      return sh( fx.origin, `git diff-tree --no-commit-id --name-only -r ${ tip }^ ${ tip }` ).split( '\n' ).filter( Boolean ).map( ( path ) => path.split( `/${ KEY }/` )[ 0 ] );
+    };
+    expect( new Set( await landed( withConfigs( 'design/items', 'work/items' ) ) ) ).toEqual( new Set( [ 'design/items' ] ) );
+    expect( new Set( await landed( withConfigs( undefined, 'work/items' ) ) ) ).toEqual( new Set( [ 'work/items' ] ) );
+    expect( new Set( await landed( withConfigs( undefined ) ) ) ).toEqual( new Set( [ 'docs/prs' ] ) );
+
+    const invalid = withConfigs( '/abs', 'work/items' );
     const prior = originTip( invalid );
     const refused = await fixtureHost( bundleFor( invalid ) );
     await flush( refused, invalid );

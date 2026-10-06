@@ -8,7 +8,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, posix } from 'node:path';
-import { normalizeRemoteUrl } from '@bett3r-dev/blueprint-spec';
+import { BLUEPRINT_CONFIG_FILE, DOCS_ROOT_DEFAULT, itemDocsPathOf, normalizeRemoteUrl } from '@bett3r-dev/blueprint-spec';
 import { runQueued } from './child.mjs';
 
 export { normalizeRemoteUrl };
@@ -25,10 +25,10 @@ export const FLUSH_DOC_FILES = [ 'blueprint.md', 'decisions.md' ];
 /** A push that loses to a branch that moved is retried from the fetch this many times, then reported non-ff. */
 export const FLUSH_PUSH_RETRIES = 3;
 
-// The bundle lives under <workDocsRoot>/<KEY>/blueprint/. `.claude/bett3r-ai-workflow.json`'s workDocsRoot,
-// read at the branch's head, overrides docs/prs; an invalid one fails the flush and never falls back.
-const DEFAULT_WORK_DOCS_ROOT = 'docs/prs';
-const WORKFLOW_CONFIG = '.claude/bett3r-ai-workflow.json';
+// The bundle lives under <docsRoot>/<KEY>/blueprint/. The docs root is `.blueprint.config.json`'s `docsRoot`, read at
+// the branch's head; a config naming none falls back to the legacy `.claude/bett3r-ai-workflow.json`'s workDocsRoot, and
+// that to docs/prs. An invalid value fails the job and never falls back.
+const LEGACY_WORKFLOW_CONFIG = '.claude/bett3r-ai-workflow.json';
 export const KEY_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 // git runs async through child.mjs (childEnv, per-repository queue, timeout); flushBundle may be handed
@@ -52,24 +52,34 @@ export const remoteTip = async ( git, dir, branch ) => {
   return { tip: listed.stdout.split( /\s/ )[ 0 ] };
 };
 
-// Where the bundle goes on this commit of the branch, or a failure when its workflow config is invalid. Shared with
+// A docs root as a config names it, normalised, or undefined when it is not a path inside the repository.
+const docsRootOf = ( value ) => {
+  const normal = typeof value === 'string' ? posix.normalize( value ).replace( /\/+$/, '' ) : '';
+  return normal === '' || normal === '.' || isAbsolute( normal ) || normal.split( '/' ).includes( '..' ) ? undefined : normal;
+};
+
+// The docs root on this commit of the branch, { root }, or { error } when a config naming it is invalid. Shared with
+// lib/scaffold.mjs and lib/pr-ready.mjs.
+export const docsRootAt = async ( git, dir, commit ) => {
+  for ( const [ file, field ] of [ [ BLUEPRINT_CONFIG_FILE, 'docsRoot' ], [ LEGACY_WORKFLOW_CONFIG, 'workDocsRoot' ] ] ) {
+    const shown = await git( dir, [ 'cat-file', 'blob', `${ commit }:${ file }` ] );
+    if ( shown.status !== 0 ) continue;
+    let config;
+    try { config = JSON.parse( shown.stdout ); } catch { return { error: `${ file } at ${ commit } is not JSON` }; }
+    const value = config?.[ field ];
+    if ( value === undefined ) continue;
+    const root = docsRootOf( value );
+    if ( root === undefined ) return { error: `${ file } at ${ commit } names ${ field } ${ JSON.stringify( value ) }, not a path inside the repository` };
+    return { root };
+  }
+  return { root: DOCS_ROOT_DEFAULT };
+};
+
+// Where the bundle goes on this commit of the branch, or a failure when its config is invalid. Shared with
 // lib/scaffold.mjs, whose scaffold.json goes one level above it.
 export const bundleDirAt = async ( git, dir, commit, key ) => {
-  const shown = await git( dir, [ 'cat-file', 'blob', `${ commit }:${ WORKFLOW_CONFIG }` ] );
-  let root = DEFAULT_WORK_DOCS_ROOT;
-  if ( shown.status === 0 ) {
-    let config;
-    try { config = JSON.parse( shown.stdout ); } catch { return { error: `${ WORKFLOW_CONFIG } at ${ commit } is not JSON` }; }
-    const value = config?.workDocsRoot;
-    if ( value !== undefined ) {
-      const normal = typeof value === 'string' ? posix.normalize( value ).replace( /\/+$/, '' ) : '';
-      if ( normal === '' || normal === '.' || isAbsolute( normal ) || normal.split( '/' ).includes( '..' ) ) {
-        return { error: `${ WORKFLOW_CONFIG } at ${ commit } names workDocsRoot ${ JSON.stringify( value ) }, not a path inside the repository` };
-      }
-      root = normal;
-    }
-  }
-  return { path: `${ root }/${ key }/blueprint` };
+  const at = await docsRootAt( git, dir, commit );
+  return at.error !== undefined ? at : { root: at.root, path: `${ itemDocsPathOf( at.root, key ) }/blueprint` };
 };
 
 // The commit message: the subject, then the session, the head and every actor the ops name.
@@ -110,7 +120,7 @@ const invalidBundle = ( bundle ) => {
 
 /**
  * Commits `bundle` to origin's `bundle.branch` from the repository at `dir` (the session's worktree), and answers the
- * outcome Steward reports: done with { commitSha, headSeq, blobShas }, or failed with { diverged } or { error }.
+ * outcome Steward reports: done with { commitSha, headSeq, blobShas, docsRoot }, or failed with { diverged } or { error }.
  */
 export const flushBundle = async ( { dir, bundle, sessionId, git = defaultGit } ) => {
   const invalid = invalidBundle( bundle );
@@ -166,18 +176,18 @@ export const flushBundle = async ( { dir, bundle, sessionId, git = defaultGit } 
     }
     // A branch that already holds the bundle as served is committed through it: no empty commit is made.
     if ( tree === await gitOut( git, dir, [ 'rev-parse', `${ base }^{tree}` ] ) ) {
-      return { ok: true, result: JSON.stringify( { commitSha: base, headSeq: bundle.headSeq, blobShas } ) };
+      return { ok: true, result: JSON.stringify( { commitSha: base, headSeq: bundle.headSeq, blobShas, docsRoot: at.root } ) };
     }
     const commit = await gitOut( git, dir, [ 'commit-tree', tree, '-p', base, '-F', '-' ], { input: messageOf( bundle, sessionId ) } );
     // (5) The push names the commit and the branch, and is never forced.
     const pushed = await git( dir, [ 'push', '--quiet', 'origin', `${ commit }:refs/heads/${ branch }` ] );
-    if ( pushed.status === 0 ) return { ok: true, result: JSON.stringify( { commitSha: commit, headSeq: bundle.headSeq, blobShas } ) };
+    if ( pushed.status === 0 ) return { ok: true, result: JSON.stringify( { commitSha: commit, headSeq: bundle.headSeq, blobShas, docsRoot: at.root } ) };
     // (6) A push refused because the branch moved from the tip it was built on goes round again from the fetch;
     // any other refusal (a protected branch, a hook) is reported with git's own words.
     const now = await remoteTip( git, dir, branch );
     if ( now.missing ) return failed( 'branch-missing', `origin's branch ${ branch } was deleted during the flush` );
     // A push that landed and then exited non-zero (the connection dropped after the ref moved) is done.
-    if ( now.tip === commit ) return { ok: true, result: JSON.stringify( { commitSha: commit, headSeq: bundle.headSeq, blobShas } ) };
+    if ( now.tip === commit ) return { ok: true, result: JSON.stringify( { commitSha: commit, headSeq: bundle.headSeq, blobShas, docsRoot: at.root } ) };
     if ( now.tip === undefined || now.tip === base ) return failed( 'push-rejected', gitFailure( pushed ) );
   }
   return failed( 'non-ff', `origin's branch ${ branch } moved under each of ${ FLUSH_PUSH_RETRIES + 1 } pushes` );
