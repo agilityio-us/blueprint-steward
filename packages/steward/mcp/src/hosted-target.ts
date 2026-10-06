@@ -252,7 +252,19 @@ export function createHostedTarget( options: HostedTargetOptions ): BlueprintTar
       const { moved, alreadyPresent } = await reclassifiedEntriesFor( seq );
       return { ...base, design, moved, alreadyPresent, overridesChanged: moved.length > 0 };
     }
-    return { ...base, design, nodeIds: ( input.nodes ?? []).map( proposedNodeId ), commentIds: idsOf( input.entries ) };
+    const commentIds = verb === 'comment' ? await commentIdsFor( seq ) : idsOf( input.entries );
+    return { ...base, design, nodeIds: ( input.nodes ?? []).map( proposedNodeId ), commentIds };
+  }
+
+  // A comment's ack is { verb, events }, and the host mints each entry's id into the comment op's payload, so the ids
+  // are read from the op at the ack's seq on the changes route, in the order the entries were sent.
+  async function commentIdsFor( seq: number ): Promise<string[]> {
+    if ( seq <= 0 ) return [];
+    const { ops } = await read<{ ops: Op[] }>( `${ CHANGES_ROUTE }?sinceSeq=${ seq - 1 }`, () => ({ ops: [] }) );
+    const op = ops.find( candidate => candidate.seq === seq && candidate.verb === 'comment' );
+    const entries = ( op?.payload as { entries?: unknown } | undefined )?.entries;
+    return ( Array.isArray( entries ) ? entries as { id?: unknown }[] : [])
+      .map( entry => entry?.id ).filter(( id ): id is string => typeof id === 'string' );
   }
 
   // An ack of a write already recorded carries no event, so a map-post's id is read back from the feed by seq: the

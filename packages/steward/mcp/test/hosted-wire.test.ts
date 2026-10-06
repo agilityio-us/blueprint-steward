@@ -8,7 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import type { BlueprintGraph, DesignFile, ProposedEdge, ProposedNode } from '@bett3r-dev/blueprint-schema';
 import { emptyMap, nodeId, proposedNodeId } from '@bett3r-dev/blueprint-schema';
-import { API_BLUEPRINT_DESIGN_JSON, MAP_ROUTE, SESSION_HEADER, SUBMIT_ROUTE } from '@bett3r-dev/blueprint-spec';
+import { API_BLUEPRINT_DESIGN_JSON, CHANGES_ROUTE, MAP_ROUTE, SESSION_HEADER, SUBMIT_ROUTE } from '@bett3r-dev/blueprint-spec';
 
 import { createHostedTarget } from '../src/hosted-target.js';
 import { createBlueprintMcpServer } from '../src/server.js';
@@ -75,6 +75,7 @@ function createFakeHost( options: { script?: Scripted[]; design?: DesignFile } =
   const calls: HostCall[] = [];
   const design: DesignFile = options.design ?? { schemaVersion: 1 };
   const recorded = new Map<string, number[]>();
+  const ops: { seq: number; verb: string; author: string; payload: unknown }[] = [];
   let lastSeq = 0;
 
   const fetchImpl = ( async ( input: FetchInput, init?: RequestInit ): Promise<Response> => {
@@ -123,6 +124,21 @@ function createFakeHost( options: { script?: Scripted[]; design?: DesignFile } =
         replayed: false,
         result: { verb: 'propose', events: [ 'NodesProposed' ] }
       });
+    }
+    // A comment is acked as the host acks it, { verb, events }; the ids it mints ride only in the op's payload, which
+    // the changes route serves.
+    if ( url.pathname === SUBMIT_ROUTE && body?.verb === 'comment' ){
+      const ts = new Date( 0 ).toISOString();
+      const entries = (( body.args as { entries: { anchor: null; text: string }[] } ).entries ).map(( entry, index ) =>
+        ({ ...entry, id: `c${ ( design.comments ?? []).length + index + 1 }`, author: 'ai' as const, ts, resolved: false }));
+      design.comments = [ ...( design.comments ?? []), ...entries ];
+      lastSeq += 1;
+      ops.push({ seq: lastSeq, verb: 'comment', author: 'ai', payload: { entries } });
+      return jsonResponse( 200, { ok: true, submissionId: body.submissionId, seqs: [ lastSeq ], seq: lastSeq, replayed: false, result: { verb: 'comment', events: [ 'CommentsAdded' ] } });
+    }
+    if ( url.pathname === CHANGES_ROUTE ){
+      const since = Number( url.searchParams.get( 'sinceSeq' ) ?? 0 );
+      return jsonResponse( 200, { ok: true, ops: ops.filter( op => op.seq > since ) });
     }
     return jsonResponse( 404, { ok: false, error: { code: 'NOT_FOUND', message: url.pathname } });
   }) as typeof globalThis.fetch;
@@ -191,6 +207,18 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     expect( host.calls.map( call => call.route )).toEqual( [ SUBMIT_ROUTE, API_BLUEPRINT_DESIGN_JSON ] );
     expect( body ).toMatchObject({ ok: true, seq: 1, designSize: { nodes: 1, edges: 0 } });
     expect( body.nodeIds ).toEqual( [ RESERVE ] );
+
+    await client.close();
+  });
+
+  it( 'Given a host that acks comment with { verb, events } and mints the ids into the op when comment is called with two entries then the agent is answered the two minted ids, read from the op at the ack\'s seq', async () => {
+    const host = createFakeHost({ design: { schemaVersion: 1, comments: [ { id: 'c1', anchor: null, text: 'earlier', author: 'human', ts: new Date( 0 ).toISOString(), resolved: false } ] } });
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({ name: 'comment', arguments: { entries: [ { text: 'why here?' }, { anchor: { node: PLACE }, text: 'and this?' } ] } }));
+
+    expect( body ).toMatchObject({ ok: true, seq: 1, commentIds: [ 'c2', 'c3' ], totalComments: 3 });
+    expect( host.calls.map( call => call.route )).toEqual( [ SUBMIT_ROUTE, API_BLUEPRINT_DESIGN_JSON, CHANGES_ROUTE ] );
 
     await client.close();
   });
