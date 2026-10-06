@@ -13,7 +13,7 @@ import {
 import { activityOf, createActivityRelay, lineSplitter, logLinesOf } from '../lib/activity.mjs';
 import { holdSecret, runQueued, setChildTimeout, spawnChild } from '../lib/child.mjs';
 import {
-  AGENT_BRANCH_PREFIX, parseSignals, SIGNAL_DONE, SIGNAL_NEEDS_HUMAN, SIGNALS_ROUTE, signalLogArgv, trailerKeyOf,
+  AGENT_BRANCH_PREFIX, latestSignal, parseSignals, SIGNAL_DONE, SIGNAL_NEEDS_HUMAN, SIGNALS_ROUTE, signalLogArgv, trailerKeyOf,
 } from '../lib/commit-signals.mjs';
 import { stewardEnv } from '../lib/env.mjs';
 import { flushBundle } from '../lib/flush.mjs';
@@ -353,11 +353,12 @@ const mergePollTick = async () => {
     signalTips.set( source, tip );
   };
   // A ticket branch's agent branch (AGENT_BRANCH_PREFIX + the ticket branch), where an implementation routine pushes:
-  // its own commits, those neither the ticket branch nor the base holds, are read under the ticket branch's key. A done
-  // merges it into the ticket branch on origin, by fast-forward or by a merge commit made with plumbing (merge-tree,
-  // commit-tree) so the checkout never moves, and the ticket branch's own read below then reports it. Any other signal
-  // is reported for the ticket branch unmerged; an agent branch that does not merge cleanly is reported needs-human on
-  // its tip. A push origin refuses (the ticket branch moved) or a report the server refuses is tried again next tick.
+  // its own commits, those neither the ticket branch nor the base holds, are read under the ticket branch's key. The
+  // latest value is the agent branch's state: a done merges it into the ticket branch on origin, by fast-forward or by a
+  // merge commit made with plumbing (merge-tree, commit-tree) so the checkout never moves, and the ticket branch's own
+  // read below then reports it. Any other latest value is reported, with the signals before it, for the ticket branch
+  // unmerged; an agent branch that does not merge cleanly is reported needs-human on its tip. A push origin refuses
+  // (the ticket branch moved) or a report the server refuses is tried again next tick.
   const mergeAgentBranch = async ( entry, source, tip ) => {
     const key = trailerKeyOf( entry );
     const agent = `${ AGENT_BRANCH_PREFIX }${ source }`;
@@ -379,7 +380,7 @@ const mergePollTick = async () => {
       console.error( `blueprint-steward: reported ${ reported.length } signal(s) on ${ agent } for ${ source }` );
       return true;
     };
-    if ( !signals.some( ( signal ) => signal.value === SIGNAL_DONE ) ) {
+    if ( latestSignal( signals )?.value !== SIGNAL_DONE ) {
       if ( signals.length === 0 || await report( signals ) ) agentTips.set( source, agentTip );
       return;
     }

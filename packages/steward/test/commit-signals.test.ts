@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 /**
  * Signals in the merge poll, and pr-ready: the merge poll reads the trailer the
  * branch list names off each listed branch's commits new since the tip it last saw, and POSTs them to
- * /api/blueprint/runner/signals; a pr-ready job takes the ticket branch's draft PR out of draft through gh, GitHub only,
+ * /api/blueprint/steward/signals, each with its commit's body less the trailers; a pr-ready job takes the ticket branch's draft PR out of draft through gh, GitHub only,
  * skipped when the branch has no open PR. Driven through the Steward binary against a fake host, a bare git remote and a
  * fake gh.
  */
@@ -117,7 +117,7 @@ const pollTicks = async ( host: { url: string; requests: Req[] }, dir: string, t
   expect( listCount( host.requests ), stderr ).toBeGreaterThanOrEqual( ticks );
   return stderr;
 };
-const P = ( sha: string, value: string, subject: string ) => ( { sha, key: 'Blueprint-Status', value, subject } );
+const P = ( sha: string, value: string, subject: string, body?: string ) => ( { sha, key: 'Blueprint-Status', value, subject, ...( body === undefined ? {} : { body } ) } );
 
 describe( 'blueprint-steward: commit signals in the merge poll', () => {
   it( 'Given a ticket branch that gained one commit ending with the trailer "Blueprint-Status: done" and a branch list naming key Blueprint-Status, when the merge poll ticks, then Steward reports one signal {sha of that commit, value done}', async () => {
@@ -134,7 +134,7 @@ describe( 'blueprint-steward: commit signals in the merge poll', () => {
     expect( r.code, r.stderr ).toBe( 0 );
     expect( signalPosts( host ) ).toEqual( [ {
       remoteUrl: remote, branch: 'P-1-checkout',
-      signals: [ { sha: done, key: 'Blueprint-Status', value: 'done', subject: 'feat: one-step checkout' } ],
+      signals: [ { sha: done, key: 'Blueprint-Status', value: 'done', subject: 'feat: one-step checkout', body: 'Pays in one step.' } ],
     } ] );
   } );
 
@@ -397,6 +397,43 @@ describe( 'blueprint-steward: the agent branch claude/<ticket branch> (implement
     expect( originTip( remote, 'P-1' )).toBe( moved );
     expect( signalPosts( host )).toEqual( [ {
       remoteUrl: remote, branch: 'P-1', signals: [ P( done, 'needs-human', 'claude/P-1 does not merge cleanly into P-1' ) ],
+    } ] );
+  } );
+
+  it( 'Given claude/P-1 whose done is followed by a later needs-human, when the poll ticks, then the latest wins: P-1 is left where it is and both are reported for P-1', async () => {
+    // GIVEN
+    const { dir, remote, ticketTip } = ticketRepo();
+    const done = writeOn( dir, 'claude/P-1', 'P-1', 'a.txt', 'a\n', 'feat: build it\n\nBlueprint-Status: done\n' );
+    const asked = writeOn( dir, 'claude/P-1', 'P-1', 'b.txt', 'b\n', 'Which currency does the total use?\n\nBlueprint-Status: needs-human\n' );
+    const host = await fakeHost( branchList( TICKET ) );
+
+    // WHEN
+    const r = await pollOnce( host, dir );
+
+    // THEN
+    expect( r.code, r.stderr ).toBe( 0 );
+    expect( originTip( remote, 'P-1' )).toBe( ticketTip );
+    expect( signalPosts( host )).toEqual( [ {
+      remoteUrl: remote, branch: 'P-1', signals: [ P( done, 'done', 'feat: build it' ), P( asked, 'needs-human', 'Which currency does the total use?' ) ],
+    } ] );
+  } );
+
+  it( 'Given claude/P-1 whose commit says rejected with its reasons in the body, when the poll ticks, then P-1 is left where it is and the rejected is reported with the body less its trailers', async () => {
+    // GIVEN
+    const { dir, remote, ticketTip } = ticketRepo();
+    const rejected = writeOn( dir, 'claude/P-1', 'P-1', 'a.txt', 'a\n',
+      'chore(P-1): the design cannot be delivered\n\nScenario s1 has no Then.\n\nThe scaffold names no handler.\n\nBlueprint-Status: rejected\nRun-Cycle: 2\n' );
+    const host = await fakeHost( branchList( TICKET ) );
+
+    // WHEN
+    const r = await pollOnce( host, dir );
+
+    // THEN
+    expect( r.code, r.stderr ).toBe( 0 );
+    expect( originTip( remote, 'P-1' )).toBe( ticketTip );
+    expect( signalPosts( host )).toEqual( [ {
+      remoteUrl: remote, branch: 'P-1',
+      signals: [ P( rejected, 'rejected', 'chore(P-1): the design cannot be delivered', 'Scenario s1 has no Then.\n\nThe scaffold names no handler.' ) ],
     } ] );
   } );
 
