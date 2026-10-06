@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  BRANCH_CLOSED_ROUTE, BRANCH_DELETED_ROUTE, BRANCH_MERGED_ROUTE, BRANCHES_ROUTE, REALITY_PUSH_ROUTE, RUNNER_CLAIM_ROUTE,
+  BRANCH_CLOSED_ROUTE, BRANCH_DELETED_ROUTE, BRANCH_MERGED_ROUTE, BRANCHES_ROUTE, legacyRouteOf, REALITY_PUSH_ROUTE,
   RUNNER_HEARTBEAT_MAX_SECONDS, RUNNER_JOB_ACTIVITY_SEGMENT, RUNNER_JOB_BUNDLE_SEGMENT, RUNNER_JOB_HEARTBEAT_SEGMENT,
-  RUNNER_JOB_KINDS, RUNNER_JOB_METHOD_SEGMENT, RUNNER_JOB_NOT_CLAIMED, RUNNER_JOBS_ROUTE, runnerJobRoute,
+  RUNNER_JOB_KINDS, RUNNER_JOB_METHOD_SEGMENT, RUNNER_JOB_NOT_CLAIMED, STEWARD_CLAIM_ROUTE, STEWARD_JOBS_ROUTE, stewardJobRoute,
 } from '@bett3r-dev/blueprint-spec';
 import { activityOf, createActivityRelay, lineSplitter, logLinesOf } from '../lib/activity.mjs';
 import { holdSecret, runQueued, setChildTimeout, spawnChild } from '../lib/child.mjs';
@@ -99,9 +99,12 @@ const COMMANDS = [ 'push', 'start', 'enqueue' ];
 // runs. The host hands it only jobs of those kinds, bound to the repository of its checkout's origin (or to none).
 // 1.1.0 runs observability-read jobs. 1.2.0 runs implementation-dispatch jobs, firing routines with the beta header
 // lib/routine.mjs pins, and, with the Jira credential, tracker-transition and tracker-describe jobs, and scaffold jobs
-// (lib/scaffold.mjs); and it loads the method plugin a design claim names. The server hands design jobs to no Steward
+// (lib/scaffold.mjs); and it loads the method plugin a design claim names. 1.3.0 speaks specification v1: it calls the
+// steward routes (the legacy runner ones when the server serves no other), reports each signal with its commit's body,
+// always commits a scaffold under the Blueprint-Scaffold trailer, merges the agent branch only when its latest signal
+// is done, and posts the item's pull-request.md as the pull request's body. The server hands design jobs to no Steward
 // below METHOD_MIN_RUNNER_VERSION (from @bett3r-dev/blueprint-spec).
-const STEWARD_VERSION = '1.2.0';
+const STEWARD_VERSION = '1.3.0';
 const args = process.argv.slice( 2 );
 const command = args[ 0 ];
 const flag = ( name ) => {
@@ -180,7 +183,14 @@ const gitIn = async ( cwd, cmd ) => {
 };
 const git = ( cmd ) => gitIn( repo, cmd );
 
-const call = async ( route, body, { method = 'POST', sessionId } = {} ) => {
+// The job, claim and signal routes are spelled under /api/blueprint/steward. A server that answers one of them 404 with
+// no refusal of its own serves only their legacy /api/blueprint/runner spelling, which is called from then on, that
+// call first.
+const ROUTE_REFUSALS = new Set( [ RUNNER_JOB_NOT_CLAIMED, 'SESSION_NOT_FOUND' ] );
+let legacyRoutes = false;
+const spelled = ( route ) => ( legacyRoutes ? legacyRouteOf( route ) ?? route : route );
+const call = async ( stewardRoute, body, { method = 'POST', sessionId } = {} ) => {
+  const route = spelled( stewardRoute );
   const response = await fetch( new URL( route, server ), {
     method,
     headers: {
@@ -195,6 +205,11 @@ const call = async ( route, body, { method = 'POST', sessionId } = {} ) => {
     // The host's refusal code ({ error: { code } }), when its body carries one, so a caller can tell refusals apart.
     let code;
     try { code = JSON.parse( text )?.error?.code; } catch { code = undefined; }
+    if ( response.status === 404 && !ROUTE_REFUSALS.has( code ) && route === stewardRoute && legacyRouteOf( route ) !== undefined ) {
+      legacyRoutes = true;
+      console.error( `blueprint-steward: the server does not serve ${ route }; calling ${ legacyRouteOf( route ) } from now on` );
+      return call( stewardRoute, body, { method, sessionId } );
+    }
     throw Object.assign( new Error( `${ method } ${ route } refused (${ response.status }): ${ text }` ), { status: response.status, code } );
   }
   return text === '' ? {} : JSON.parse( text );
@@ -475,7 +490,7 @@ const KILL_GRACE_MS = 10_000;
 // test/ticket-branch.test.ts holds the beats equal to it. A step beat is awaited before the step starts; one the host
 // refuses is logged and the step runs all the same (the lease is the periodic beat's to lose).
 const beatStep = async ( job, step ) => {
-  await call( runnerJobRoute( job.id, RUNNER_JOB_HEARTBEAT_SEGMENT ), { intervalSeconds: heartbeatSeconds, step }, { sessionId: job.sessionId } )
+  await call( stewardJobRoute( job.id, RUNNER_JOB_HEARTBEAT_SEGMENT ), { intervalSeconds: heartbeatSeconds, step }, { sessionId: job.sessionId } )
     .catch( ( err ) => { console.error( `blueprint-steward: step heartbeat (${ step }): ${ err.message }` ); } );
 };
 
@@ -586,7 +601,7 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
   // RUNNER_JOB_NOT_CLAIMED means the host no longer holds the job as claimed with a live lease (the lease expired or
   // was reaped as worker-lost, or the job was reported): the agent is stopped and no report is posted. Any other refusal or network error is logged and
   // the next heartbeat still goes out.
-  const beat = () => call( runnerJobRoute( job.id, RUNNER_JOB_HEARTBEAT_SEGMENT ), { intervalSeconds: heartbeatSeconds }, { sessionId } ).then(
+  const beat = () => call( stewardJobRoute( job.id, RUNNER_JOB_HEARTBEAT_SEGMENT ), { intervalSeconds: heartbeatSeconds }, { sessionId } ).then(
     () => { schedule(); },
     ( err ) => {
       if ( err.status === 404 && err.code === RUNNER_JOB_NOT_CLAIMED ) {
@@ -705,7 +720,7 @@ const methodFor = async ( job ) => {
   }
   let bytes;
   try {
-    const response = await fetch( new URL( runnerJobRoute( job.id, RUNNER_JOB_METHOD_SEGMENT ), server ), {
+    const response = await fetch( new URL( spelled( stewardJobRoute( job.id, RUNNER_JOB_METHOD_SEGMENT ) ), server ), {
       headers: { Authorization: `Bearer ${ token }`, ...( job.sessionId ? { 'x-blueprint-session-id': job.sessionId } : {} ) },
       signal: AbortSignal.timeout( METHOD_DOWNLOAD_TIMEOUT_MS ),
     } );
@@ -851,7 +866,7 @@ const runJob = async ( job, sessionId ) => {
   // The board's live view of the job: each step it enters, each tool the agent calls, and how it ended, posted in
   // batches (lib/activity.mjs). The last batch is posted before the job is reported.
   const relay = createActivityRelay( {
-    post: ( entries ) => call( runnerJobRoute( job.id, RUNNER_JOB_ACTIVITY_SEGMENT ), { entries }, { sessionId } ),
+    post: ( entries ) => call( stewardJobRoute( job.id, RUNNER_JOB_ACTIVITY_SEGMENT ), { entries }, { sessionId } ),
     onError: ( err ) => { console.error( `blueprint-steward: activity of job ${ job.id }: ${ err.message }` ); },
   } );
   const onStep = async ( step ) => {
@@ -892,7 +907,7 @@ const checkoutOf = async ( sessionId ) => {
   return dir !== undefined && await isWorktreeOfRepo( dir ) ? dir : repo;
 };
 const runFlush = async ( job ) => {
-  const bundle = await call( runnerJobRoute( job.id, RUNNER_JOB_BUNDLE_SEGMENT ), undefined, { method: 'GET', sessionId: job.sessionId } );
+  const bundle = await call( stewardJobRoute( job.id, RUNNER_JOB_BUNDLE_SEGMENT ), undefined, { method: 'GET', sessionId: job.sessionId } );
   return flushBundle( { dir: await checkoutOf( job.sessionId ), bundle, sessionId: job.sessionId, git: ( cwd, argv, options = {} ) => runQueued( repo, 'git', argv, { cwd, input: options.input, extraEnv: options.env } ) } );
 };
 
@@ -1028,7 +1043,7 @@ try {
   } else if ( command === 'enqueue' ) {
     // With no session named, the host picks this repository's own session from its origin remote.
     const remoteUrl = sessionFlag ? undefined : await git( 'remote get-url origin' );
-    const { job } = await call( RUNNER_JOBS_ROUTE, { kind: 'design', branch: flag( '--branch' ), prompt: flag( '--prompt' ), remoteUrl }, { sessionId: sessionFlag } );
+    const { job } = await call( STEWARD_JOBS_ROUTE, { kind: 'design', branch: flag( '--branch' ), prompt: flag( '--prompt' ), remoteUrl }, { sessionId: sessionFlag } );
     console.log( `blueprint-steward: queued job ${ job.id } for session ${ job.sessionId }` );
   } else if ( args.includes( '--poll-once' ) ) {
     await mergePollTick();
@@ -1056,7 +1071,7 @@ try {
         console.error( `blueprint-steward: job ${ job.id } lost its lease; not reported` );
         return;
       }
-      await call( runnerJobRoute( job.id ), {
+      await call( stewardJobRoute( job.id ), {
         status: outcome.ok ? 'done' : 'failed', result: outcome.result,
         ...( outcome.reason ? { reason: outcome.reason } : {} ), ...( outcome.usage ? { usage: outcome.usage } : {} ),
       }, { sessionId: job.sessionId } )
@@ -1074,7 +1089,7 @@ try {
       const kinds = running.size < concurrency ? [ ...JOB_HANDLERS.keys() ] : readsOnly;
       if ( kinds.length > 0 ) {
         try {
-          ( { job } = await call( RUNNER_CLAIM_ROUTE, {
+          ( { job } = await call( STEWARD_CLAIM_ROUTE, {
             remoteUrl: await git( 'remote get-url origin' ), kinds, runnerVersion: STEWARD_VERSION,
             ...( kinds.includes( IMPLEMENTATION_DISPATCH_JOB_KIND ) ? { routineAliases: ROUTINE_ALIASES } : {} ),
           }, { sessionId: sessionFlag } ) );

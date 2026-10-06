@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
  */
 
 const BIN = resolve( __dirname, '../bin/blueprint-steward.mjs' );
-const SIGNALS_ROUTE = '/api/blueprint/runner/signals';
+const SIGNALS_ROUTE = '/api/blueprint/steward/signals';
 const BRANCHES_ROUTE = '/api/blueprint/branches';
 
 type Req = { method: string; url: string; body: unknown };
@@ -440,11 +440,11 @@ const fakeGh = ( prs: Record<string, unknown>[] ) => {
 const prReadyJob = { id: 'jp', kind: 'pr-ready', sessionId: 'sess-p', payload: { branch: 'P-1-checkout' } };
 const claimOnce = ( job: Record<string, unknown> ) => {
   let claimed = false;
-  return ( req: Req ) => ( req.url === '/api/blueprint/runner/claim' && !claimed ? ( claimed = true, { job } ) : {} );
+  return ( req: Req ) => ( req.url === '/api/blueprint/steward/claim' && !claimed ? ( claimed = true, { job } ) : {} );
 };
 const startOnce = ( host: { url: string }, repo: string, env: Record<string, string> ) =>
   run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], env );
-const reportOf = ( host: { requests: Req[] }, id: string ) => host.requests.find( ( q ) => q.url === `/api/blueprint/runner/jobs/${ id }` )?.body as Report | undefined;
+const reportOf = ( host: { requests: Req[] }, id: string ) => host.requests.find( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }` )?.body as Report | undefined;
 
 describe( 'blueprint-steward: pr-ready job', () => {
   it( 'Given a pr-ready job for a branch with an open draft PR on GitHub, when Steward runs it, then gh pr ready is called on that PR and the job is done', async () => {

@@ -36,7 +36,7 @@ const fakeHost = async ( job: Record<string, unknown>, claudeRecord?: string ) =
         res.end( METHOD_ZIP );
         return;
       }
-      const body = req.url === '/api/blueprint/runner/claim' && !claimed ? ( claimed = true, { job } ) : {};
+      const body = req.url === '/api/blueprint/steward/claim' && !claimed ? ( claimed = true, { job } ) : {};
       res.writeHead( 200, { 'Content-Type': 'application/json' } );
       res.end( JSON.stringify( body ) );
     } );
@@ -106,9 +106,9 @@ const ticketBranchJob = ( payload: Record<string, unknown> = {} ) => ( {
   id: 'jt', kind: 'ticket-branch', sessionId: 'sess-t',
   payload: { key: 'P-1', title: 'Add a thing', branch: 'P-1-add-a-thing', base: 'main', create: true, draftPr: true, prompt: 'Design ticket P-1', ...payload },
 } );
-const reportOf = ( host: { requests: Req[] }, id: string ) => host.requests.find( ( q ) => q.url === `/api/blueprint/runner/jobs/${ id }` );
+const reportOf = ( host: { requests: Req[] }, id: string ) => host.requests.find( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }` );
 const stepsOf = ( host: { requests: Req[] }, id: string ) =>
-  host.requests.filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ id }/heartbeat` && q.body?.step !== undefined ).map( ( q ) => q.body.step );
+  host.requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }/heartbeat` && q.body?.step !== undefined ).map( ( q ) => q.body.step );
 
 describe( 'blueprint-steward: ticket-branch job', () => {
   it( 'a branch origin lacks is created on the base\'s tip and reported created: at the tip itself without draftPr, one empty commit on it with', async () => {

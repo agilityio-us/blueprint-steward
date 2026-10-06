@@ -44,7 +44,7 @@ const fakeServer = async ( answer: ( req: Req ) => { status?: number; body?: unk
 /** A host that hands out `job` on the first claim and nothing after. */
 const fakeHost = ( job: Record<string, unknown> ) => {
   let claimed = false;
-  return fakeServer( ( req ) => ( req.url === '/api/blueprint/runner/claim' && !claimed ? ( claimed = true, { body: { job } } ) : {} ) );
+  return fakeServer( ( req ) => ( req.url === '/api/blueprint/steward/claim' && !claimed ? ( claimed = true, { body: { job } } ) : {} ) );
 };
 
 const makeRepo = () => {
@@ -65,8 +65,8 @@ const runOnce = ( hostUrl: string, env: Record<string, string> ) => new Promise<
 } );
 
 const dispatch = ( alias: string ) => ( { id: 'jd', kind: 'implementation-dispatch', sessionId: null, branch: null, prompt: null, payload: { alias, text: 'Implement PROJ-42' } } );
-const claimOf = ( host: { requests: Req[] } ) => host.requests.find( ( q ) => q.url === '/api/blueprint/runner/claim' )!;
-const reportOf = ( host: { requests: Req[] } ) => host.requests.find( ( q ) => q.url === '/api/blueprint/runner/jobs/jd' )?.body;
+const claimOf = ( host: { requests: Req[] } ) => host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
+const reportOf = ( host: { requests: Req[] } ) => host.requests.find( ( q ) => q.url === '/api/blueprint/steward/jobs/jd' )?.body;
 
 const SESSION_URL = 'https://claude.ai/code/session_01PROJ42';
 

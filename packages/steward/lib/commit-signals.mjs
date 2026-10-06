@@ -3,11 +3,11 @@
 // key comes with the branch list, per branch, as `signalTrailerKey`; a branch naming none reads the default.
 
 import {
-  AGENT_BRANCH_PREFIX, RUNNER_SIGNALS_ROUTE, SIGNAL_DONE, SIGNAL_NEEDS_HUMAN, SIGNAL_TRAILER_KEY_DEFAULT, SIGNAL_TRAILER_KEY_PATTERN,
+  AGENT_BRANCH_PREFIX, SIGNAL_DONE, SIGNAL_NEEDS_HUMAN, SIGNAL_TRAILER_KEY_DEFAULT, SIGNAL_TRAILER_KEY_PATTERN, STEWARD_SIGNALS_ROUTE,
 } from '@bett3r-dev/blueprint-spec';
 
 export { AGENT_BRANCH_PREFIX, SIGNAL_DONE, SIGNAL_NEEDS_HUMAN, SIGNAL_TRAILER_KEY_DEFAULT };
-export const SIGNALS_ROUTE = RUNNER_SIGNALS_ROUTE;
+export const SIGNALS_ROUTE = STEWARD_SIGNALS_ROUTE;
 
 
 // A key outside SIGNAL_TRAILER_KEY_PATTERN would rewrite the format it is spliced into (git's

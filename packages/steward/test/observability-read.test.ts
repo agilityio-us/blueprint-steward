@@ -28,7 +28,7 @@ const fakeHost = async ( job: Record<string, unknown> ) => {
     req.on( 'data', ( c ) => { data += c; } );
     req.on( 'end', () => {
       requests.push( { url: req.url!, body: data ? JSON.parse( data ) : undefined } );
-      const body = req.url === '/api/blueprint/runner/claim' && !claimed ? ( claimed = true, { job } ) : {};
+      const body = req.url === '/api/blueprint/steward/claim' && !claimed ? ( claimed = true, { job } ) : {};
       res.writeHead( 200, { 'Content-Type': 'application/json' } );
       res.end( JSON.stringify( body ) );
     } );
@@ -73,7 +73,7 @@ const readJob = ( payload: Record<string, unknown> ) => ( { id: 'jr', kind: 'obs
 const handle = async ( repo: string, payload: Record<string, unknown>, flags: string[] = [] ) => {
   const host = await fakeHost( readJob( payload ) );
   const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', ...flags ] );
-  const report = host.requests.find( ( q ) => q.url === '/api/blueprint/runner/jobs/jr' );
+  const report = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/jobs/jr' );
   return { code: r.code, stderr: r.stderr, status: report?.body.status, reason: report?.body.reason, result: report === undefined ? undefined : parsed( report.body.result as string ) };
 };
 

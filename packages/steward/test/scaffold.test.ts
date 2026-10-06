@@ -58,13 +58,13 @@ const fixtureHost = async ( job: Job ) => {
     req.on( 'end', () => {
       requests.push( { method: req.method!, url: req.url!, body: data ? JSON.parse( data ) as Body : undefined } );
       res.writeHead( 200, { 'Content-Type': 'application/json' } );
-      res.end( JSON.stringify( req.url === '/api/blueprint/runner/claim' ? { job } : {} ) );
+      res.end( JSON.stringify( req.url === '/api/blueprint/steward/claim' ? { job } : {} ) );
     } );
   } );
   servers.push( server );
   await new Promise<void>( ( r ) => server.listen( 0, '127.0.0.1', () => r() ) );
   const { port } = server.address() as { port: number };
-  const reports = () => requests.filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ job.id }` && q.method === 'POST' );
+  const reports = () => requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ job.id }` && q.method === 'POST' );
   return { url: `http://127.0.0.1:${ port }`, requests, reports };
 };
 

@@ -157,7 +157,7 @@ describe( 'blueprint-steward CLI', () => {
     expect( r.code ).toBe( 0 );
     expect( r.stdout ).toContain( 'queued job j1' );
     const [ req ] = host.requests;
-    expect( req.url ).toBe( '/api/blueprint/runner/jobs' );
+    expect( req.url ).toBe( '/api/blueprint/steward/jobs' );
     expect( req.headers[ 'x-blueprint-session-id' ] ).toBe( 's1' );
     expect( req.body ).toEqual( { kind: 'design', branch: 'feature', prompt: 'hi' } );
   } );
@@ -179,7 +179,7 @@ describe( 'blueprint-steward CLI', () => {
   const TOOLS = { tools: [ 'mcp__blueprint', 'Read', 'Glob', 'Grep' ], disallowedTools: [ 'mcp__blueprint__start_map_session' ] };
 
   const jobHost = () => fakeHost( ( req ) =>
-    req.url === '/api/blueprint/runner/claim'
+    req.url === '/api/blueprint/steward/claim'
       ? { body: { job: { id: 'j9', kind: 'design', sessionId: 'sess-9', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-j9', instructions: SERVED, method: METHOD, ...TOOLS } } }
       : {} );
 
@@ -202,9 +202,9 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: script } );
     expect( r.code ).toBe( 0 );
     const urls = host.requests.map( ( q ) => q.url );
-    const posts = host.requests.filter( ( q ) => q.url === '/api/blueprint/runner/jobs/j9/activity' );
+    const posts = host.requests.filter( ( q ) => q.url === '/api/blueprint/steward/jobs/j9/activity' );
     expect( posts.length ).toBeGreaterThan( 0 );
-    expect( urls.lastIndexOf( '/api/blueprint/runner/jobs/j9/activity' ) ).toBeLessThan( urls.lastIndexOf( '/api/blueprint/runner/jobs/j9' ) );
+    expect( urls.lastIndexOf( '/api/blueprint/steward/jobs/j9/activity' ) ).toBeLessThan( urls.lastIndexOf( '/api/blueprint/steward/jobs/j9' ) );
     expect( posts[ 0 ].headers[ 'x-blueprint-session-id' ] ).toBe( 'sess-9' );
     const entries = posts.flatMap( ( q ) => q.body.entries ).map( ( { kind, name } ) => ( name === undefined ? { kind } : { kind, name } ) );
     expect( entries ).toEqual( [
@@ -226,7 +226,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
     expect( r.code ).toBe( 0 );
     const requests = unstepped( host.requests );
-    expect( requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/runner/claim', '/api/blueprint/reality', '/api/blueprint/runner/jobs/j9' ] );
+    expect( requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/reality', '/api/blueprint/steward/jobs/j9' ] );
     expect( requests[ 1 ].headers[ 'x-blueprint-session-id' ] ).toBe( 'sess-9' );
     expect( requests[ 1 ].body.branch ).toBe( 'feature' );
     const rec = JSON.parse( readFileSync( claude.record, 'utf-8' ) );
@@ -247,7 +247,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   // The server picks the model and the optional run cap and the claim carries both; Steward passes them to claude
   // as --model and --max-budget-usd (USD, from micros). A job carrying neither adds neither flag.
   const modelHost = ( stamped: Record<string, unknown> ) => fakeHost( ( req ) =>
-    req.url === '/api/blueprint/runner/claim'
+    req.url === '/api/blueprint/steward/claim'
       ? { body: { job: { id: 'jm', kind: 'design', sessionId: 'sess-m', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-jm', instructions: SERVED, method: METHOD, ...TOOLS, ...stamped } } }
       : {} );
   const flagOf = ( argv: string[], flag: string ) => ( argv.includes( flag ) ? argv[ argv.indexOf( flag ) + 1 ] : undefined );
@@ -288,7 +288,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo( 'exit 3' ), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
     expect( r.code ).toBe( 0 );
     const requests = unstepped( host.requests );
-    expect( requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/runner/claim', '/api/blueprint/runner/jobs/j9' ] );
+    expect( requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/j9' ] );
     expect( requests[ 1 ].body.status ).toBe( 'failed' );
     expect( existsSync( claude.record ) ).toBe( false );
   } );
@@ -299,18 +299,18 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   // names observability-read. With no BLUEPRINT_ROUTINE_* pair it holds no routine, so it names neither
   // implementation-dispatch nor any alias. It commits the scaffold output, so it names scaffold. It loads the method
   // plugin the host serves with a design claim (METHOD_MIN_RUNNER_VERSION from @bett3r-dev/blueprint-spec), as
-  // version 1.2.0.
-  it( 'start --once: the claim carries the origin remoteUrl, the kinds design, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold and observability-read, and Steward\'s version 1.2.0', async () => {
+  // version 1.3.0.
+  it( 'start --once: the claim carries the origin remoteUrl, the kinds design, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold and observability-read, and Steward\'s version 1.3.0', async () => {
     const host = await fakeHost( () => ( { body: { job: null } } ) );
     const repo = makeRepo();
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--interval', '60', '--merge-poll', '600' ], {},
-      { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/runner/claim' ) } );
-    const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/runner/claim' )!;
+      { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' ) } );
+    const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
     expect( claim.body ).toMatchObject( {
       remoteUrl: execSync( 'git remote get-url origin', { cwd: repo, encoding: 'utf-8' } ).trim(),
       kinds: [ 'design', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read' ],
     } );
-    expect( claim.body.runnerVersion ).toBe( '1.2.0' );
+    expect( claim.body.runnerVersion ).toBe( '1.3.0' );
     expect( claim.body.routineAliases ).toBeUndefined();
     // The host hands design jobs only to a version at or above its method minimum: Steward must meet it.
     expect( runnerMeets( claim.body.runnerVersion, METHOD_MIN_RUNNER_VERSION ) ).toBe( true );
@@ -323,8 +323,8 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const host = await fakeHost( () => ( { body: { job: null } } ) );
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--interval', '60', '--merge-poll', '600' ], {
       BLUEPRINT_JIRA_BASE_URL: 'https://acme.atlassian.net', BLUEPRINT_JIRA_EMAIL: 'bot@acme.test', BLUEPRINT_JIRA_API_TOKEN: 'jira-token',
-    }, { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/runner/claim' ) } );
-    const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/runner/claim' )!;
+    }, { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' ) } );
+    const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
     expect( claim.body.kinds ).toEqual( [ 'design', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read', 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe' ] );
   } );
 
@@ -333,7 +333,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   const bindingHost = ( jobBranch: string | null, bound: string | null ) => {
     const state = { binding: bound };
     return fakeHost( ( req ) => {
-      if ( req.url === '/api/blueprint/runner/claim' ) return { body: { job: { id: 'jb', kind: 'design', sessionId: 'sess-b', branch: jobBranch, prompt: null, jobKey: 'bpjk_minted-for-jb', instructions: SERVED, method: METHOD, ...TOOLS } } };
+      if ( req.url === '/api/blueprint/steward/claim' ) return { body: { job: { id: 'jb', kind: 'design', sessionId: 'sess-b', branch: jobBranch, prompt: null, jobKey: 'bpjk_minted-for-jb', instructions: SERVED, method: METHOD, ...TOOLS } } };
       if ( req.url === '/api/blueprint/reality' ) state.binding = req.body.branch;
       return {};
     } ).then( ( host ) => ( { ...host, state } ) );
@@ -402,12 +402,12 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
 
   it( 'start --once: a design job whose claim carries no job key is reported failed without running the agent', async () => {
     const host = await fakeHost( ( req ) =>
-      req.url === '/api/blueprint/runner/claim' ? { body: { job: { id: 'jn', kind: 'design', sessionId: 'sess-n', branch: 'feature', prompt: null, instructions: SERVED, method: METHOD, ...TOOLS } } } : {} );
+      req.url === '/api/blueprint/steward/claim' ? { body: { job: { id: 'jn', kind: 'design', sessionId: 'sess-n', branch: 'feature', prompt: null, instructions: SERVED, method: METHOD, ...TOOLS } } } : {} );
     const claude = makeFakeClaude( 0 );
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
     expect( r.code ).toBe( 0 );
     const report = host.requests.at( -1 )!;
-    expect( [ report.url, report.body.status ] ).toEqual( [ '/api/blueprint/runner/jobs/jn', 'failed' ] );
+    expect( [ report.url, report.body.status ] ).toEqual( [ '/api/blueprint/steward/jobs/jn', 'failed' ] );
     expect( report.body.result ).toContain( 'no job key' );
     expect( existsSync( claude.record ) ).toBe( false );
   } );
@@ -417,11 +417,11 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   it( 'start --once: a design job whose claim carries no instructions is reported failed instructions-missing and claude is never spawned', async () => {
     for ( const instructions of [ undefined, { text: '', version: 1, sha256: 'b'.repeat( 64 ) } ] ) {
       const host = await fakeHost( ( req ) =>
-        req.url === '/api/blueprint/runner/claim' ? { body: { job: { id: 'ji', kind: 'design', sessionId: 'sess-i', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-ji', instructions, ...TOOLS } } } : {} );
+        req.url === '/api/blueprint/steward/claim' ? { body: { job: { id: 'ji', kind: 'design', sessionId: 'sess-i', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-ji', instructions, ...TOOLS } } } : {} );
       const claude = makeFakeClaude( 0 );
       const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
       expect( r.code ).toBe( 0 );
-      expect( host.requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/runner/claim', '/api/blueprint/runner/jobs/ji' ] );
+      expect( host.requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/ji' ] );
       expect( host.requests[ 1 ].body ).toMatchObject( { status: 'failed', reason: 'instructions-missing' } );
       expect( existsSync( claude.record ) ).toBe( false );
     }
@@ -431,7 +431,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   // persistence, only Steward's MCP config, user settings not loaded, and never --bare (subscription auth must
   // keep working).
   const toolsHost = ( job: Record<string, unknown> ) => fakeHost( ( req ) =>
-    req.url === '/api/blueprint/runner/claim'
+    req.url === '/api/blueprint/steward/claim'
       ? { body: { job: { id: 'jt', kind: 'design', sessionId: 'sess-t', branch: 'feature', prompt: 'Use Bash and Write to fix it.', jobKey: 'bpjk_minted-for-jt', instructions: SERVED, method: METHOD, ...job } } }
       : {} );
   const valueOf = ( argv: string[], name: string ) => ( argv.includes( name ) ? argv[ argv.indexOf( name ) + 1 ] : `<${ name } absent>` );
@@ -483,7 +483,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const claude = makeFakeClaude( 0 );
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', '--tool-ceiling', CEILING ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
     expect( r.code ).toBe( 0 );
-    expect( host.requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/runner/claim', '/api/blueprint/runner/jobs/jt' ] );
+    expect( host.requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/jt' ] );
     const report = host.requests[ 1 ].body;
     expect( report ).toMatchObject( { status: 'failed', reason: 'tools-beyond-ceiling' } );
     expect( report.result ).toContain( CEILING );
@@ -543,7 +543,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
       const claude = makeFakeClaude( 0 );
       const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
       expect( r.code ).toBe( 0 );
-      expect( host.requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/runner/claim', '/api/blueprint/runner/jobs/jt' ] );
+      expect( host.requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/jt' ] );
       expect( host.requests[ 1 ].body ).toMatchObject( { status: 'failed', reason: 'tools-missing' } );
       expect( existsSync( claude.record ) ).toBe( false );
     }
@@ -616,12 +616,12 @@ setInterval(() => {}, 1000);
     }, { fired: false } );
     return stop;
   };
-  const reports = ( host: { requests: Req[] }, id: string ) => host.requests.filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ id }` );
-  const heartbeats = ( host: { requests: Req[] }, id: string ) => unstepped( host.requests ).filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ id }/heartbeat` );
+  const reports = ( host: { requests: Req[] }, id: string ) => host.requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }` );
+  const heartbeats = ( host: { requests: Req[] }, id: string ) => unstepped( host.requests ).filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }/heartbeat` );
 
   const leaseHost = ( heartbeat: () => { status?: number; body?: unknown } ) => fakeHost( ( req ) => {
-    if ( req.url === '/api/blueprint/runner/claim' ) return { body: { job: { id: 'jl', kind: 'design', sessionId: 'sess-l', branch: 'feature', prompt: null, jobKey: 'bpjk_minted-for-jl', instructions: SERVED, method: METHOD, ...TOOLS } } };
-    if ( req.url === '/api/blueprint/runner/jobs/jl/heartbeat' && req.body?.step === undefined ) return heartbeat();
+    if ( req.url === '/api/blueprint/steward/claim' ) return { body: { job: { id: 'jl', kind: 'design', sessionId: 'sess-l', branch: 'feature', prompt: null, jobKey: 'bpjk_minted-for-jl', instructions: SERVED, method: METHOD, ...TOOLS } } };
+    if ( req.url === '/api/blueprint/steward/jobs/jl/heartbeat' && req.body?.step === undefined ) return heartbeat();
     return {};
   } );
 
@@ -744,8 +744,8 @@ setInterval(() => {}, 1000);
       // An accepted flag reaches the claim loop and is stopped at its claim (not at the merge poller's request, which
       // can come first); a refused one exits before any request.
       const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--interval', '0.05', ...rest ], {},
-        { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/runner/claim' ) } );
-      const claimed = host.requests.some( ( q ) => q.url === '/api/blueprint/runner/claim' );
+        { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' ) } );
+      const claimed = host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' );
       expect( [ rest, r.code === 1, claimed, r.stderr.includes( 'needs a positive number' ) ] ).toEqual( [ rest, refused, !refused, refused ] );
     }
   }, 30_000 );
@@ -756,11 +756,11 @@ setInterval(() => {}, 1000);
   it( 'start --once: a claimed job of an unknown kind reports failed kind-unknown and never runs the design flow', async () => {
     for ( const kind of [ 'mystery', 'constructor', undefined ] ) {
       const host = await fakeHost( ( req ) =>
-        req.url === '/api/blueprint/runner/claim' ? { body: { job: { id: 'jm', kind, sessionId: 'sess-m', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-jm', instructions: SERVED, method: METHOD, ...TOOLS } } } : {} );
+        req.url === '/api/blueprint/steward/claim' ? { body: { job: { id: 'jm', kind, sessionId: 'sess-m', branch: 'feature', prompt: 'do it', jobKey: 'bpjk_minted-for-jm', instructions: SERVED, method: METHOD, ...TOOLS } } } : {} );
       const claude = makeFakeClaude( 0 );
       const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
       expect( [ kind, r.code ] ).toEqual( [ kind, 0 ] );
-      expect( [ kind, host.requests.map( ( q ) => q.url ) ] ).toEqual( [ kind, [ '/api/blueprint/runner/claim', '/api/blueprint/runner/jobs/jm' ] ] );
+      expect( [ kind, host.requests.map( ( q ) => q.url ) ] ).toEqual( [ kind, [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/jm' ] ] );
       expect( host.requests[ 1 ].body ).toMatchObject( { status: 'failed', reason: 'kind-unknown' } );
       expect( existsSync( claude.record ) ).toBe( false );
     }
@@ -863,7 +863,7 @@ process.exit(${ exitCode });
     const r = await run( [ 'start', '--server', host.url, '--token', 'bad', '--interval', '0.05', '--once' ], {},
       { killWhen: () => host.requests.length >= 2 } );
     expect( host.requests.length ).toBeGreaterThanOrEqual( 2 );
-    expect( host.requests.every( ( q ) => q.url === '/api/blueprint/runner/claim' ) ).toBe( true );
+    expect( host.requests.every( ( q ) => q.url === '/api/blueprint/steward/claim' ) ).toBe( true );
     expect( r.stderr ).toContain( '(401)' );
   } );
 } );
@@ -880,12 +880,12 @@ describe( 'blueprint-steward start: the method plugin', () => {
   const designJob = ( id: string, extra: Record<string, unknown> = {} ) =>
     ( { id, kind: 'design', sessionId: `sess-${ id }`, branch: 'feature', prompt: null, jobKey: `bpjk_minted-for-${ id }`, instructions: SERVED, ...TOOLS, method: METHOD, ...extra } );
   const claimOnly = ( job: Record<string, unknown>, method?: MethodAnswer ) =>
-    fakeHost( ( req ) => ( req.url === '/api/blueprint/runner/claim' ? { body: { job } } : {} ), method === undefined ? {} : { method } );
+    fakeHost( ( req ) => ( req.url === '/api/blueprint/steward/claim' ? { body: { job } } : {} ), method === undefined ? {} : { method } );
   // Where Steward keeps verified zips: beside the session worktrees, in a directory no session id can name
   // (a session segment starts with a letter or digit), one file per sha256.
   const methodCacheOf = ( repo: string ) => join( `${ repo }.blueprint-worktrees`, '.method' );
   const methodGets = ( host: { requests: Req[] } ) => host.requests.filter( ( q ) => q.method === 'GET' && METHOD_ROUTE.test( q.url ) );
-  const reportOf = ( host: { requests: Req[] }, id: string ) => host.requests.filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ id }` ).map( ( q ) => q.body );
+  const reportOf = ( host: { requests: Req[] }, id: string ) => host.requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }` ).map( ( q ) => q.body );
   const argOf = ( argv: string[], name: string ) => ( argv.includes( name ) ? argv[ argv.indexOf( name ) + 1 ] : `<${ name } absent>` );
   const once = ( host: { url: string }, repo: string, script: string, rest: string[] = [] ) =>
     run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', ...rest ], { BLUEPRINT_STEWARD_CLAUDE: script } );
@@ -899,7 +899,7 @@ describe( 'blueprint-steward start: the method plugin', () => {
     const r = await once( host, repo, claude.script );
     expect( r.code ).toBe( 0 );
     expect( host.requests.map( ( q ) => `${ q.method } ${ q.url }` ) ).toEqual( [
-      'POST /api/blueprint/runner/claim', 'GET /api/blueprint/runner/jobs/jx/method', 'POST /api/blueprint/runner/jobs/jx',
+      'POST /api/blueprint/steward/claim', 'GET /api/blueprint/steward/jobs/jx/method', 'POST /api/blueprint/steward/jobs/jx',
     ] );
     expect( methodGets( host )[ 0 ].headers[ 'x-blueprint-session-id' ] ).toBe( 'sess-jx' );
     expect( reportOf( host, 'jx' ) ).toMatchObject( [ { status: 'failed', reason: 'method-mismatch' } ] );
@@ -913,7 +913,7 @@ describe( 'blueprint-steward start: the method plugin', () => {
       const claude = makeFakeClaude( 0 );
       const r = await once( host, makeRepo(), claude.script );
       expect( r.code ).toBe( 0 );
-      expect( [ method, host.requests.map( ( q ) => q.url ) ] ).toEqual( [ method, [ '/api/blueprint/runner/claim', '/api/blueprint/runner/jobs/jm' ] ] );
+      expect( [ method, host.requests.map( ( q ) => q.url ) ] ).toEqual( [ method, [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/jm' ] ] );
       expect( reportOf( host, 'jm' ) ).toMatchObject( [ { status: 'failed', reason: 'method-missing' } ] );
       expect( existsSync( claude.record ) ).toBe( false );
     }
@@ -1107,14 +1107,14 @@ describe( 'blueprint-steward start: the optional repo history tool', () => {
     tools: [ 'mcp__blueprint', 'Read', 'Glob', 'Grep' ], disallowedTools: [ 'mcp__blueprint__start_map_session' ], optionalTools: [ 'mcp__blueprint_repo' ], ...extra,
   } );
   const runWith = async ( job: Record<string, unknown>, rest: string[] = [] ) => {
-    const host = await fakeHost( ( req ) => ( req.url === '/api/blueprint/runner/claim' ? { body: { job } } : {} ) );
+    const host = await fakeHost( ( req ) => ( req.url === '/api/blueprint/steward/claim' ? { body: { job } } : {} ) );
     const repo = makeRepo();
     const claude = makeFakeClaude( 0 );
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', ...rest ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
     expect( r.code ).toBe( 0 );
     const rec = JSON.parse( readFileSync( claude.record, 'utf-8' ) ) as { argv: string[]; mcp: { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> } };
     const argOf = ( name: string ) => ( rec.argv.includes( name ) ? rec.argv[ rec.argv.indexOf( name ) + 1 ] : `<${ name } absent>` );
-    const report = host.requests.filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ job.id }` ).map( ( q ) => [ q.body.status, q.body.reason ] );
+    const report = host.requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ job.id }` ).map( ( q ) => [ q.body.status, q.body.reason ] );
     return { repo, rec, servers: Object.keys( rec.mcp.mcpServers ).sort(), allowed: argOf( '--allowedTools' ), builtIn: argOf( '--tools' ), report };
   };
 
@@ -1172,7 +1172,7 @@ describe( 'blueprint-steward start: per-session worktrees', () => {
     const reported: Report[] = [];
     const claimed: Array<{ id: string; at: number }> = [];
     const host = await fakeHost( ( req ) => {
-      if ( req.url === '/api/blueprint/runner/claim' ) {
+      if ( req.url === '/api/blueprint/steward/claim' ) {
         const kinds: unknown[] | undefined = req.body?.kinds;
         const at = queue.findIndex( ( queued ) => kinds === undefined || kinds.includes( queued.kind ) );
         // Git is async now, so a job that needs an earlier job's worktree waits (`waitFor`) until it exists.
@@ -1330,7 +1330,7 @@ tick();
     expect( host.reported.map( ( r ) => [ r.id, r.body.status ] ) ).toEqual( [ [ 'jr', 'done' ], [ 'ja', 'done' ] ] );
     expect( JSON.parse( readReport!.body.result ) ).toEqual( { status: 'not-declared' } );
     expect( readReport!.at < agent.end ).toBe( true );
-    const claims = host.requests.filter( ( q ) => q.url === '/api/blueprint/runner/claim' );
+    const claims = host.requests.filter( ( q ) => q.url === '/api/blueprint/steward/claim' );
     expect( claims[ 1 ].body.kinds ).toEqual( [ 'observability-read' ] );
   }, 40_000 );
 
@@ -1544,7 +1544,7 @@ process.exit(2);
   const pollOnce = ( host: { url: string; requests: Req[] }, repo: string, gh: { script: string } ) =>
     run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--poll-once' ],
       { ...ambient, BLUEPRINT_GIT_HOST: 'github', BLUEPRINT_STEWARD_GH: gh.script },
-      { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/runner/claim' ) } );
+      { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' ) } );
   const merged = ( host: { requests: Req[] } ) => host.requests.filter( ( q ) => q.url === '/api/blueprint/branches/merged' );
 
   it( 'a merge commit is detected by ancestry, without calling the host adapter', async () => {
@@ -1706,7 +1706,7 @@ process.exit(2);
     const host = await fakeHost( ( req ) => req.url.startsWith( '/api/blueprint/branches?' ) ? { body: { branches: [] } } : {} );
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), ...argv ], { ...ambient, ...env }, { killWhen: () => until( host ) } );
     const polls = host.requests.filter( ( q ) => q.url.startsWith( '/api/blueprint/branches?' ) ).length;
-    const claims = host.requests.filter( ( q ) => q.url === '/api/blueprint/runner/claim' ).length;
+    const claims = host.requests.filter( ( q ) => q.url === '/api/blueprint/steward/claim' ).length;
     return { polls, claims };
   };
 
@@ -1715,7 +1715,7 @@ process.exit(2);
   it( 'a claimed git-poll job runs one merge-poll tick instead of the push + agent flow, then reports done', async () => {
     const repo = mergeRepo( 'merge-commit' );
     const host = await fakeHost( ( req ) =>
-      req.url === '/api/blueprint/runner/claim' ? { body: { job: { id: 'jg', kind: 'git-poll', sessionId: 'sess-g', branch: null, prompt: null } } }
+      req.url === '/api/blueprint/steward/claim' ? { body: { job: { id: 'jg', kind: 'git-poll', sessionId: 'sess-g', branch: null, prompt: null } } }
         : req.url.startsWith( '/api/blueprint/branches?' ) ? { body: { branches: [ { branch: 'feat/x', baseBranch: 'main' } ] } }
           : {} );
     const claude = makeFakeClaude( 0 );
@@ -1723,7 +1723,7 @@ process.exit(2);
       { ...ambient, BLUEPRINT_STEWARD_CLAUDE: claude.script, BLUEPRINT_GIT_HOST: 'github', BLUEPRINT_STEWARD_GH: makeFakeGh( { authed: true } ).script } );
     expect( r.code ).toBe( 0 );
     expect( host.requests.map( ( q ) => q.url.split( '?' )[ 0 ] ) ).toEqual( [
-      '/api/blueprint/runner/claim', '/api/blueprint/branches', '/api/blueprint/branches/merged', '/api/blueprint/runner/jobs/jg'
+      '/api/blueprint/steward/claim', '/api/blueprint/branches', '/api/blueprint/branches/merged', '/api/blueprint/steward/jobs/jg'
     ] );
     expect( host.requests[ 3 ].body.status ).toBe( 'done' );
     expect( existsSync( claude.record ) ).toBe( false );
@@ -1731,7 +1731,7 @@ process.exit(2);
 
   it( 'the job-claim interval and the merge-poll interval are independent cadences', async () => {
     const fastClaims = await countWhile( [ '--interval', '0.02', '--merge-poll', '60' ], {},
-      ( h ) => h.requests.filter( ( q ) => q.url === '/api/blueprint/runner/claim' ).length >= 10 );
+      ( h ) => h.requests.filter( ( q ) => q.url === '/api/blueprint/steward/claim' ).length >= 10 );
     expect( fastClaims.claims ).toBeGreaterThanOrEqual( 10 );
     expect( fastClaims.polls ).toBe( 1 );
     const fastPolls = await countWhile( [ '--interval', '60', '--merge-poll', '0.02' ], {},
@@ -1796,7 +1796,7 @@ process.exit( code );
     const heartbeats: Array<{ id: string; t: number }> = [];
     const reported: Array<{ id: string; body: any; t: number }> = [];
     const h = await fakeHost( ( req ) => {
-      if ( req.url === '/api/blueprint/runner/claim' ) {
+      if ( req.url === '/api/blueprint/steward/claim' ) {
         claims.push( Date.now() );
         const waitFor = queue[ 0 ]?.waitFor;
         return { body: { job: typeof waitFor === 'string' && !existsSync( waitFor ) ? null : queue.shift() ?? null } };

@@ -72,8 +72,8 @@ const fixtureHost = async ( bundle: Bundle, job = { id: 'jf', kind: 'flush', ses
     req.on( 'end', () => {
       const r: Req = { method: req.method!, url: req.url!, headers: req.headers, body: data ? JSON.parse( data ) as Body : undefined };
       requests.push( r );
-      const body = r.url === '/api/blueprint/runner/claim' ? { job }
-        : r.url === `/api/blueprint/runner/jobs/${ job.id }/bundle` && r.method === 'GET' ? { ok: true, ...bundle }
+      const body = r.url === '/api/blueprint/steward/claim' ? { job }
+        : r.url === `/api/blueprint/steward/jobs/${ job.id }/bundle` && r.method === 'GET' ? { ok: true, ...bundle }
           : {};
       res.writeHead( 200, { 'Content-Type': 'application/json' } );
       res.end( JSON.stringify( body ) );
@@ -82,7 +82,7 @@ const fixtureHost = async ( bundle: Bundle, job = { id: 'jf', kind: 'flush', ses
   servers.push( server );
   await new Promise<void>( ( r ) => server.listen( 0, '127.0.0.1', () => r() ) );
   const { port } = server.address() as { port: number };
-  const reports = () => requests.filter( ( q ) => q.url === `/api/blueprint/runner/jobs/${ job.id }` && q.method === 'POST' );
+  const reports = () => requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ job.id }` && q.method === 'POST' );
   return { url: `http://127.0.0.1:${ port }`, requests, reports };
 };
 
@@ -213,7 +213,7 @@ describe( 'blueprint-steward flush', { timeout: 30_000 }, () => {
     const fx = makeFixture();
     const host = await fixtureHost( bundleFor( fx ) );
     await flush( host, fx );
-    const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/runner/claim' )!;
+    const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
     expect( claim.body?.kinds ).toContain( 'flush' );
   } );
 
@@ -238,7 +238,7 @@ describe( 'blueprint-steward flush', { timeout: 30_000 }, () => {
     expect( { worktree: snapshot( fx.worktree ), repo: snapshot( fx.repo ) } ).toEqual( before );
     // The report: the commit, the head it carries, and each file's blob as committed.
     expect( host.requests.map( ( q ) => `${ q.method } ${ q.url }` ) ).toEqual( [
-      'POST /api/blueprint/runner/claim', 'GET /api/blueprint/runner/jobs/jf/bundle', 'POST /api/blueprint/runner/jobs/jf',
+      'POST /api/blueprint/steward/claim', 'GET /api/blueprint/steward/jobs/jf/bundle', 'POST /api/blueprint/steward/jobs/jf',
     ] );
     expect( host.requests[ 1 ].headers[ 'x-blueprint-session-id' ] ).toBe( SESSION );
     expect( resultOf( host ) ).toEqual( {
