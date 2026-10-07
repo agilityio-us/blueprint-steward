@@ -116,6 +116,14 @@ extractor writes them. Any other item under either section fails the design, cit
 `designTooling.scaffold`, `docsRoot` and the existing fields. A harness keeps its settings in a file
 of its own.
 
+`designTooling.typeWords`, optional, names the word a node type's code names end in, by type:
+`{ "aggregate": "Aggregate", "policy": "Policy" }`. A design may label a node without it, so a
+proposed node is also realized by its code id: its label without the word it may end in, in
+PascalCase, with the word appended once, slugified into the id in place of the label's slug. The
+repository's extractor writes the same words onto the graph it pushes, as `typeWords`, and Blueprint
+and the agent both match a proposed node, and every edge naming it, by its own id or its code id.
+Without the field, only a node's own id realizes it.
+
 ## 6. The signal
 
 On F, a trailer under the fire's `signal` key, on any commit. Steward reads F's new commits on each
