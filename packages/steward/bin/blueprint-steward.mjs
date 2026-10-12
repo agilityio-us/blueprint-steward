@@ -305,8 +305,16 @@ const mergePollTick = async () => {
   const fetched = await runGit( repo, [ 'fetch', '--prune', 'origin' ] );
   if ( fetched.status !== 0 ) throw new Error( `git fetch --prune failed: ${ fetched.stderr.trim() }` );
   const pruned = new Set( [ ...`${ fetched.stdout }\n${ fetched.stderr }`.matchAll( /\[deleted\].*->\s*origin\/(\S+)/g ) ].map( ( m ) => m[ 1 ] ) );
+  // origin/HEAD is re-read from origin each tick, so a renamed or switched default branch is followed without a restart;
+  // when origin cannot be asked, the one recorded last stands.
+  const headSet = await runGit( repo, [ 'remote', 'set-head', 'origin', '--auto' ] );
+  if ( headSet.status !== 0 ) console.error( `blueprint-steward: origin's default branch: ${ gitFailure( headSet ) }` );
   const { branches = [] } = await call( `${ BRANCHES_ROUTE }?remoteUrl=${ encodeURIComponent( remoteUrl ?? '' ) }`, undefined, { method: 'GET' } );
-  const defaultBranch = ( await git( 'symbolic-ref refs/remotes/origin/HEAD' ) )?.replace( /^refs\/remotes\/origin\//, '' );
+  const defaultBranch = await remoteDefaultBranch();
+  // A branch's base is the one it was cut from while origin still has it, else origin's default branch: a base renamed
+  // or deleted on origin (master renamed to main) would otherwise leave its commits unread and its merges undetected.
+  const baseOf = async ( entry ) => entry.baseBranch && await git( `rev-parse --verify --quiet refs/remotes/origin/${ entry.baseBranch }` )
+    ? entry.baseBranch : defaultBranch;
   const isAncestorSha = async ( a, b ) => ( await runGit( repo, [ 'merge-base', '--is-ancestor', a, b ] ) ).status === 0;
   const isAncestor = ( tip, target ) => isAncestorSha( tip, `origin/${ target }` );
   // Ancestry alone is not a merge signal: a branch cut from its target's own tip, with no commits
@@ -337,7 +345,7 @@ const mergePollTick = async () => {
     const key = trailerKeyOf( entry );
     if ( !tip || key === undefined || signalTips.get( source ) === tip ) return;
     const seen = signalTips.get( source );
-    const base = entry.baseBranch || defaultBranch;
+    const base = await baseOf( entry );
     const baseTip = base && base !== source ? await git( `rev-parse --verify --quiet refs/remotes/origin/${ base }` ) : undefined;
     const exclude = [ baseTip, seen !== undefined && await isAncestorSha( seen, tip ) ? seen : undefined ].filter( Boolean );
     if ( exclude.length === 0 ) { signalTips.set( source, tip ); return; }
@@ -368,7 +376,7 @@ const mergePollTick = async () => {
     if ( !tip || key === undefined || source.startsWith( AGENT_BRANCH_PREFIX ) ) return;
     const agentTip = await git( `rev-parse --verify --quiet refs/remotes/origin/${ agent }` );
     if ( !agentTip || agentTips.get( source ) === agentTip || await isAncestorSha( agentTip, tip ) ) return;
-    const base = entry.baseBranch || defaultBranch;
+    const base = await baseOf( entry );
     const baseTip = base && base !== source ? await git( `rev-parse --verify --quiet refs/remotes/origin/${ base }` ) : undefined;
     const logged = await runGit( repo, signalLogArgv( key, [ agentTip, `^${ tip }`, ...( baseTip ? [ `^${ baseTip }` ] : [] ) ] ) );
     if ( logged.status !== 0 ) { console.error( `blueprint-steward: signals of ${ agent }: ${ gitFailure( logged ) }` ); return; }
@@ -408,7 +416,8 @@ const mergePollTick = async () => {
   };
   let host;
   for ( const entry of branches ) {
-    const { branch: source, baseBranch } = entry;
+    const { branch: source } = entry;
+    const baseBranch = await baseOf( entry );
     if ( pruned.has( source ) ) {
       await call( BRANCH_DELETED_ROUTE, { remoteUrl, branch: source } );
       console.error( `blueprint-steward: reported ${ source } deleted` );

@@ -304,6 +304,27 @@ describe( 'blueprint-steward: commit signals read only the branch\'s own commits
       remoteUrl: remote, branch: 'P-11-twice', signals: [ P( both, 'blocked', 'feat: eleven' ), P( both, 'done', 'feat: eleven' ) ],
     } ] );
   } );
+
+  it( 'Given a branch listed with base master after origin renamed master to main, when the poll ticks, then the base is origin\'s default branch: the branch\'s own commit is reported and the base\'s is not', async () => {
+    // GIVEN: origin's default branch was master when the clone fetched it, the ticket branch was cut from it after another
+    // ticket's done landed there, and origin then renamed master to main; the clone still holds origin/HEAD -> origin/master.
+    const { dir, remote } = makeRepo();
+    execSync( `git checkout -q -b master && git push -q origin master && git -C ${ remote } symbolic-ref HEAD refs/heads/master && git push -q origin --delete main`, { cwd: dir } );
+    execSync( 'git fetch -q --prune origin && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master', { cwd: dir } );
+    execSync( `${ G } commit -q --allow-empty -m "feat: other ticket" -m "Blueprint-Status: done" && git push -q origin master`, { cwd: dir } );
+    execSync( `git checkout -q -b P-12-renamed && ${ G } commit -q --allow-empty -m "feat: twelve" -m "Blueprint-Status: done" && git push -q origin P-12-renamed && git checkout -q master`, { cwd: dir } );
+    const mine = execSync( 'git rev-parse P-12-renamed', { cwd: dir, encoding: 'utf-8' } ).trim();
+    execSync( `git -C ${ remote } branch -m master main && git -C ${ remote } symbolic-ref HEAD refs/heads/main` );
+    const host = await fakeHost( branchList( [ { branch: 'P-12-renamed', baseBranch: 'master', signalTrailerKey: 'Blueprint-Status' } ] ) );
+
+    // WHEN
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', dir, '--poll-once' ] );
+
+    // THEN
+    expect( r.code, r.stderr ).toBe( 0 );
+    expect( signalPosts( host ) ).toEqual( [ { remoteUrl: remote, branch: 'P-12-renamed', signals: [ P( mine, 'done', 'feat: twelve' ) ] } ] );
+    expect( execSync( 'git symbolic-ref refs/remotes/origin/HEAD', { cwd: dir, encoding: 'utf-8' } ).trim() ).toBe( 'refs/remotes/origin/main' );
+  } );
 } );
 
 /**
