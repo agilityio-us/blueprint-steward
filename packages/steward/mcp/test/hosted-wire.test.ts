@@ -8,7 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import type { BlueprintGraph, DesignFile, ProposedEdge, ProposedNode } from '@bett3r-dev/blueprint-schema';
 import { emptyMap, nodeId, proposedNodeId } from '@bett3r-dev/blueprint-schema';
-import { API_BLUEPRINT_DESIGN_JSON, CHANGES_ROUTE, MAP_ROUTE, SESSION_HEADER, SUBMIT_ROUTE } from '@bett3r-dev/blueprint-spec';
+import { API_BLUEPRINT_DESIGN_JSON, API_BLUEPRINT_GRAPH_JSON, CHANGES_ROUTE, MAP_ROUTE, SESSION_HEADER, SUBMIT_ROUTE } from '@bett3r-dev/blueprint-spec';
 
 import { createHostedTarget } from '../src/hosted-target.js';
 import { createBlueprintMcpServer } from '../src/server.js';
@@ -70,7 +70,7 @@ function jsonResponse( status: number, body: unknown ): Response {
 
 // The fake host keeps the session's design and answers a submission it has seen before as already recorded
 // (replayed: true), under the seqs it first landed at.
-function createFakeHost( options: { script?: Scripted[]; design?: DesignFile } = {}): FakeHost {
+function createFakeHost( options: { script?: Scripted[]; design?: DesignFile; graph?: BlueprintGraph } = {}): FakeHost {
   const script = [ ...( options.script ?? []) ];
   const calls: HostCall[] = [];
   const design: DesignFile = options.design ?? { schemaVersion: 1 };
@@ -99,6 +99,7 @@ function createFakeHost( options: { script?: Scripted[]; design?: DesignFile } =
     }
 
     if ( url.pathname === API_BLUEPRINT_DESIGN_JSON ) return jsonResponse( 200, design );
+    if ( url.pathname === API_BLUEPRINT_GRAPH_JSON && options.graph !== undefined ) return jsonResponse( 200, options.graph );
     if ( url.pathname === MAP_ROUTE ){
       return jsonResponse( 200, { ok: true, map: { ...emptyMap(), shape: 'impact', grounded: true }, mapSeq: 3 });
     }
@@ -204,9 +205,25 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
       args: { ...PROPOSE, author: 'ai' }
     });
     expect( typeof submits[ 0 ].submissionId ).toBe( 'string' );
-    expect( host.calls.map( call => call.route )).toEqual( [ SUBMIT_ROUTE, API_BLUEPRINT_DESIGN_JSON ] );
+    expect( host.calls.map( call => call.route )).toEqual( [ SUBMIT_ROUTE, API_BLUEPRINT_DESIGN_JSON, API_BLUEPRINT_GRAPH_JSON ] );
     expect( body ).toMatchObject({ ok: true, seq: 1, designSize: { nodes: 1, edges: 0 } });
     expect( body.nodeIds ).toEqual( [ RESERVE ] );
+
+    await client.close();
+  });
+
+  it( 'Given a host that acks propose with { verb, events } when the batch draws aggregate -[produces]-> event then the write lands and its TOPOLOGY_VIOLATION comes back as a finding (ADR-016)', async () => {
+    const host = createFakeHost({ graph: GRAPH });
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({ name: 'propose', arguments: {
+      nodes: [ { type: 'event', label: 'Order Cancelled', subdomain: 'sales' } ],
+      edges: [ { from: ORDER, to: nodeId( 'sales', 'event', 'Order Cancelled' ), kind: 'produces' } ]
+    } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    expect( body.findings ).toEqual( [ expect.objectContaining({ code: 'TOPOLOGY_VIOLATION' }) ] );
+    expect( host.design.propose?.edges ).toHaveLength( 1 );
 
     await client.close();
   });
@@ -218,7 +235,7 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     const body = toolBody( await client.callTool({ name: 'comment', arguments: { entries: [ { text: 'why here?' }, { anchor: { node: PLACE }, text: 'and this?' } ] } }));
 
     expect( body ).toMatchObject({ ok: true, seq: 1, commentIds: [ 'c2', 'c3' ], totalComments: 3 });
-    expect( host.calls.map( call => call.route )).toEqual( [ SUBMIT_ROUTE, API_BLUEPRINT_DESIGN_JSON, CHANGES_ROUTE ] );
+    expect( host.calls.map( call => call.route )).toEqual( [ SUBMIT_ROUTE, API_BLUEPRINT_DESIGN_JSON, CHANGES_ROUTE, API_BLUEPRINT_GRAPH_JSON ] );
 
     await client.close();
   });

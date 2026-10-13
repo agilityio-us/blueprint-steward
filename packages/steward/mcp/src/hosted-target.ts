@@ -7,7 +7,9 @@ import {
   joinCoverageLinks,
   joinMapLinks,
   proposedNodeId,
+  validateDesign,
   type DesignFile,
+  type DesignValidationIssue,
   type BlueprintGraph,
   type CoverageLink,
   type CoverageReport,
@@ -227,7 +229,7 @@ export function createHostedTarget( options: HostedTargetOptions ): BlueprintTar
 
   // A verb's ack is { verb, events }. From it and the session's reads come what the handlers read: the seq, the
   // post-write design or map, and the ids the write carried. A proposed node's id is derived from its subdomain, type
-  // and label. The ack carries no findings, so they are reported empty.
+  // and label. The ack carries no findings, so a design write's are judged here (findingsOf).
   async function rebuiltResult( verb: HostedVerb, args: unknown, seqs: number[], acked: Record<string, unknown> ): Promise<Record<string, unknown>> {
     const input = ( args ?? {}) as { nodes?: ProposeNodeInput[]; entries?: { id?: unknown }[] };
     const idsOf = ( items: { id?: unknown }[] | undefined ): string[] =>
@@ -253,7 +255,20 @@ export function createHostedTarget( options: HostedTargetOptions ): BlueprintTar
       return { ...base, design, moved, alreadyPresent, overridesChanged: moved.length > 0 };
     }
     const commentIds = verb === 'comment' ? await commentIdsFor( seq ) : idsOf( input.entries );
-    return { ...base, design, nodeIds: ( input.nodes ?? []).map( proposedNodeId ), commentIds };
+    return { ...base, design, findings: await findingsOf( design ), nodeIds: ( input.nodes ?? []).map( proposedNodeId ), commentIds };
+  }
+
+  // ADR-016: an incoherent write lands and its writer is told, so the agent repairs it rather than leaving an
+  // illegal edge on the board. The host does not answer findings, so they are judged here, as the local store
+  // judges them: the written design against the session's graph. A graph that cannot be read judges nothing.
+  async function findingsOf( design: DesignFile ): Promise<DesignValidationIssue[]> {
+    let graph: BlueprintGraph | null;
+    try {
+      graph = await read<BlueprintGraph | null>( API_BLUEPRINT_GRAPH_JSON, () => null );
+    } catch {
+      return [];
+    }
+    return graph === null ? [] : validateDesign( design, { graph }).incoherent;
   }
 
   // A comment's ack is { verb, events }, and the host mints each entry's id into the comment op's payload, so the ids
