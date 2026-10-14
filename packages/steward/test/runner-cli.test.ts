@@ -1506,6 +1506,43 @@ tick();
     expect( readFileSync( calls, 'utf-8' ).trim().split( '\n' ) ).toEqual( [ `${ wt } install --frozen-lockfile --ignore-scripts` ] );
   } );
 
+  // A worktree's node_modules outlives the lockfile it was installed from: the branch moves under it between jobs.
+  // One installed from another lockfile, or by no install of the runner's (no stamp), is installed again before
+  // extracting; one installed from the lockfile it now holds is not.
+  it( 'a pnpm worktree whose node_modules was installed from another lockfile, or carries no stamp, installs again before extracting', async () => {
+    const G = '-c user.email=t@t -c user.name=t';
+    const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-pnpm-' ) );
+    const calls = join( dir, 'calls.log' );
+    writeFileSync( join( dir, 'pnpm' ), `#!/bin/sh\necho "$(pwd -P) $*" >> ${ calls }\nmkdir -p node_modules\n` );
+    execSync( `chmod +x ${ join( dir, 'pnpm' ) }` );
+    const callsSoFar = () => ( existsSync( calls ) ? readFileSync( calls, 'utf-8' ).trim().split( '\n' ) : [] );
+    const repo = makeRepo( 'mkdir -p .blueprint && echo \'{"nodes":[]}\' > .blueprint/graph.json' );
+    sh( `echo v1 > pnpm-lock.yaml && git ${ G } add pnpm-lock.yaml && git ${ G } commit -qm lock && git push -q origin main`, repo );
+    const env = { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script, PATH: `${ dir }:${ process.env.PATH }` };
+    const runJob = async ( id: string ) => {
+      const host = await queueHost( [ design( id, 'sess-l', 'main' ) ] );
+      await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], env );
+      return host.reported.map( ( r ) => r.body.status );
+    };
+
+    // The first job extracts without an install; the runner then finds a node_modules no install of its own made.
+    expect( await runJob( 'j1' ) ).toEqual( [ 'done' ] );
+    expect( callsSoFar() ).toEqual( [] );
+    const wt = realDir( worktreeOf( repo, 'sess-l' ) );
+    mkdirSync( join( wt, 'node_modules' ) );
+    expect( await runJob( 'j2' ) ).toEqual( [ 'done' ] );
+    expect( callsSoFar() ).toEqual( [ `${ wt } install --frozen-lockfile --ignore-scripts` ] );
+
+    // Installed from the lockfile it holds: no install.
+    expect( await runJob( 'j3' ) ).toEqual( [ 'done' ] );
+    expect( callsSoFar() ).toHaveLength( 1 );
+
+    // The branch moves to a new lockfile: one install.
+    sh( `echo v2 > pnpm-lock.yaml && git ${ G } commit -qam lock2 && git push -q origin main`, repo );
+    expect( await runJob( 'j4' ) ).toEqual( [ 'done' ] );
+    expect( callsSoFar() ).toEqual( [ `${ wt } install --frozen-lockfile --ignore-scripts`, `${ wt } install --frozen-lockfile --ignore-scripts` ] );
+  } );
+
   it( 'a --concurrency that is not a positive whole number exits 1', async () => {
     for ( const value of [ '0', '-1', '1.5', 'abc' ] ) {
       const host = await queueHost( [] );

@@ -23,7 +23,7 @@
     "src"
   ],
   "dependencies": {
-    "@bett3r-dev/blueprint-schema": "^1.7.0"
+    "@bett3r-dev/blueprint-schema": "^1.8.0"
   },
   "publishConfig": {
     "access": "public"

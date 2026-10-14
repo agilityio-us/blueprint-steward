@@ -241,14 +241,33 @@ const installWithoutScripts = ( dir ) => {
   if ( existsSync( join( dir, 'yarn.lock' ) ) ) return [ 'yarn', [ 'install', '--immutable', '--mode=skip-build' ] ];
   return undefined;
 };
+// A session's worktree keeps its node_modules across jobs while its branch moves, so an install made at one lockfile
+// would go on serving a later one: a scaffold then ran a superseded @bett3r-dev/blueprint-schema against a design the
+// current one accepts. Each install records the lockfile's hash in node_modules; a worktree whose node_modules carries
+// no hash, or another lockfile's, is installed again before it extracts.
+const INSTALLED_LOCK = '.blueprint-steward-lock';
+const lockfileOf = ( dir ) => [ 'pnpm-lock.yaml', 'yarn.lock' ].map( ( name ) => join( dir, name ) ).find( ( path ) => existsSync( path ) );
+const lockHashOf = ( dir ) => sha256Of( readFileSync( lockfileOf( dir ) ) );
+const installIn = async ( dir, install ) => {
+  await exec( ...install, { cwd: dir } );
+  if ( existsSync( join( dir, 'node_modules' ) ) ) writeFileSync( join( dir, 'node_modules', INSTALLED_LOCK ), `${ lockHashOf( dir ) }\n` );
+};
+const installIsStale = ( dir ) => {
+  const stamp = join( dir, 'node_modules', INSTALLED_LOCK );
+  return !existsSync( stamp ) || readFileSync( stamp, 'utf-8' ).trim() !== lockHashOf( dir );
+};
 const extractIn = async ( dir, command, { worktree } ) => {
+  const install = installWithoutScripts( dir );
+  if ( worktree && install && existsSync( join( dir, 'node_modules' ) ) && installIsStale( dir ) ) {
+    console.error( `blueprint-steward: ${ dir }'s node_modules was not installed from its current lockfile; installing without build scripts` );
+    await installIn( dir, install );
+  }
   try {
     await exec( command, [], { cwd: dir, shell: true } );
   } catch ( err ) {
-    const install = installWithoutScripts( dir );
     if ( !worktree || existsSync( join( dir, 'node_modules' ) ) || !install ) throw err;
     console.error( `blueprint-steward: ${ err.message }; installing without build scripts in ${ dir } and extracting again` );
-    await exec( ...install, { cwd: dir } );
+    await installIn( dir, install );
     await exec( command, [], { cwd: dir, shell: true } );
   }
 };
