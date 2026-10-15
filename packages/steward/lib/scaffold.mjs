@@ -116,12 +116,11 @@ const scaffoldCommitOf = async ( git, dir, tip, sha, reportPath ) => {
   try { report = JSON.parse( shown.stdout ); } catch { return undefined; }
   if ( report?.baseSha !== sha ) return undefined;
   const result = report.scaffolder ?? {};
-  // The status the report states; a report without one (an older Steward's) is read back from the scaffolder's report it
-  // carries: its --json output has no scenarios.decisions, so a scenario test with outcome `decision` (as classify reads
-  // it) stands in for that half of EXIT_BLOCKED.
-  const blocked = ( result.skipped ?? [] ).some( ( s ) => s?.reason === 'blocked' || s?.reason === 'error' )
-    || ( result.scenarioTests ?? [] ).some( ( t ) => t?.outcome === 'decision' );
-  const outcome = [ 'done', 'blocked', 'skipped' ].includes( report.status ) ? report.status : blocked ? 'blocked' : 'done';
+  // Blocked as a fresh run reads it, from the scaffolder's report the commit carries: classify asks something. The status
+  // the report states is not trusted for blocked, since an older Steward stated it for a no-template unit alone, which is
+  // still owed, never asked, and does not hold the ticket. A stated skipped stands.
+  const blocked = classify( result ).asked.length > 0;
+  const outcome = report.status === 'skipped' ? 'skipped' : blocked ? 'blocked' : 'done';
   const changed = await gitOut( git, dir, [ 'diff-tree', '--no-commit-id', '-r', '--name-only', sha, tip ] );
   return {
     outcome, committed: true, commitSha: tip, resumed: true, report: reportPath,
@@ -284,7 +283,8 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
   const blobs = {};
   for ( const path of committed ) blobs[ path ] = await gitOut( git, dir, [ 'hash-object', '-w', '--', path ] );
   const { asked, owed, worklist } = classify( result );
-  const outcome = ran.status === EXIT_BLOCKED ? 'blocked' : 'done';
+  // cli.ts exits 3 for a no-template unit too, but that one is still owed, not a question: only what classify asks blocks.
+  const outcome = ran.status === EXIT_BLOCKED && asked.length > 0 ? 'blocked' : 'done';
   const report = {
     version: 1, status: outcome, mode: 'hosted-cli', ticket: key, baseSha: sha,
     inputs: { maps: [ { file: mapPath, digest: await digest( join( dir, mapPath ) ) } ], design: await digest( join( dir, designPath ) ), graph: await digest( join( dir, '.blueprint', 'graph.json' ) ).catch( () => null ) },
