@@ -30,7 +30,7 @@ const USAGE = `Usage:
   blueprint-steward push    --server <url> [--token <t>] [--repo <path>] [--session <id>] [--no-extract]
   blueprint-steward start   --server <url> [--token <t>] [--repo <path>] [--session <id>] [--interval <s>] [--once]
                       [--merge-poll <s>] [--poll-once] [--tool-ceiling <tools>] [--heartbeat <s>] [--max-run-minutes <m>]
-                      [--concurrency <n>] [--git-timeout <s>]
+                      [--concurrency <n>] [--git-timeout <s>] [--design-tools <tools>] [--design-writes allow|forbid]
   blueprint-steward enqueue --server <url> [--token <t>] [--session <id>] [--branch <b>] [--prompt <text>]
 
 Steward is the part of Blueprint you run beside your own codebase, with your own keys. Only the graph, diagnostics,
@@ -76,6 +76,15 @@ your declared reader) ever leave this machine; source never does. The server nev
                 A tool the host offers as optional is used only when named here (or with no ceiling); otherwise
                 the job runs without it. Today that is mcp__blueprint_repo, read-only git history: a second MCP
                 server beside blueprint-mcp that runs only git log, show, grep and diff on the job's worktree.
+  --design-tools  start: tools every design job's agent gets beside the ones the server serves, space- or
+                comma-separated, e.g. "Bash Skill Write Edit" (default: $BLUEPRINT_STEWARD_DESIGN_TOOLS, else none).
+                Each is pre-approved (--allowedTools) and, for a built-in, made available (--tools); "Skill" lets
+                the agent use the skills the checkout's project settings and plugins load. With a --tool-ceiling,
+                each must be named in it, or Steward exits 1. An empty value is refused.
+  --design-writes start: allow (the default, or $BLUEPRINT_STEWARD_DESIGN_WRITES) or forbid. allow: a design job's
+                agent may change the session's worktree with the tools it holds; Steward logs what it left, and
+                the session's next job discards its tracked changes (untracked files stay). forbid: Steward
+                exits 1 when --design-tools names a tool that writes (Bash, Write, Edit, MultiEdit, NotebookEdit).
   --heartbeat   start: seconds between the heartbeats that hold a running job's lease (default 60, at most 600).
                 When the host answers that it no longer holds the job, the agent is stopped and nothing is reported.
   --git-timeout start: the longest any one git or gh call Steward makes may take (default 600). Those calls run
@@ -131,6 +140,35 @@ const toolCeiling = ceilingValue === undefined || ceilingValue.startsWith( '--' 
 if ( args.includes( '--tool-ceiling' ) && toolCeiling === undefined ) {
   console.error( 'blueprint-steward: --tool-ceiling needs a tool list; an empty flag is refused rather than read as no ceiling\n' );
   console.error( USAGE );
+  process.exit( 1 );
+}
+// Blueprint ADR-135: the team's own grant to every design job, beside the tools the server serves, and whether a design
+// job may change its worktree. The ceiling still holds the grant: a granted tool outside it, or a writing tool under
+// forbid, is refused here rather than at every job. The flag wins over the environment; an empty flag, or a non-empty
+// value that lists no tool, is refused. An empty environment variable is none, so a manifest can leave it blank.
+const designToolsFlagged = args.includes( '--design-tools' );
+const designToolsValue = designToolsFlagged ? flag( '--design-tools' ) : process.env.BLUEPRINT_STEWARD_DESIGN_TOOLS;
+const designTools = designToolsValue === undefined || designToolsValue.startsWith( '--' ) ? [] : toolList( designToolsValue );
+if ( designTools.length === 0 && ( designToolsFlagged || ( designToolsValue ?? '' ).trim() !== '' ) ) {
+  console.error( 'blueprint-steward: --design-tools needs a tool list; an empty value is refused rather than read as none\n' );
+  console.error( USAGE );
+  process.exit( 1 );
+}
+const designWrites = flag( '--design-writes' ) ?? ( process.env.BLUEPRINT_STEWARD_DESIGN_WRITES || 'allow' );
+if ( ![ 'allow', 'forbid' ].includes( designWrites ) ) {
+  console.error( 'blueprint-steward: --design-writes is allow or forbid\n' );
+  console.error( USAGE );
+  process.exit( 1 );
+}
+const WRITING_TOOLS = [ 'Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit' ];
+const writingGranted = designTools.filter( ( tool ) => WRITING_TOOLS.includes( tool.replace( /\(.*$/, '' ) ) );
+if ( designWrites === 'forbid' && writingGranted.length > 0 ) {
+  console.error( `blueprint-steward: --design-writes forbid, but --design-tools grants ${ writingGranted.join( ' ' ) }, which can write to the worktree\n` );
+  process.exit( 1 );
+}
+const grantedBeyondCeiling = toolCeiling === undefined ? [] : designTools.filter( ( tool ) => !toolCeiling.includes( tool ) );
+if ( grantedBeyondCeiling.length > 0 ) {
+  console.error( `blueprint-steward: --design-tools grants ${ grantedBeyondCeiling.join( ' ' ) }, beyond this Steward's --tool-ceiling "${ toolCeiling.join( ' ' ) }"\n` );
   process.exit( 1 );
 }
 // The heartbeat cadence and the agent's wall-clock limit. The host refuses a heartbeat interval above 600 s
@@ -699,6 +737,16 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
   } );
 } );
 
+// Blueprint ADR-135: what a design job's agent left in the session's worktree, logged for the team. The session's next
+// job checks out with --force, which discards tracked changes and keeps untracked files.
+const logLeftovers = async ( job, dir ) => {
+  const status = await runGit( dir, [ 'status', '--porcelain', '--untracked-files=all' ] );
+  const paths = status.status === 0 ? status.stdout.split( '\n' ).filter( ( line ) => line.trim() !== '' ) : [];
+  if ( paths.length === 0 ) return;
+  const shown = paths.slice( 0, 20 ).join( '\n  ' );
+  console.log( `[${ job.id.slice( 0, 8 ) }] the agent left ${ paths.length } changed path${ paths.length === 1 ? '' : 's' } in ${ dir }; the session's next job discards tracked changes, untracked files stay:\n  ${ shown }${ paths.length > 20 ? '\n  …' : '' }` );
+};
+
 // "Check git now" on the board queues a `git-poll` job. It is answered by one merge-poll
 // tick, not by the design flow: no checkout, no reality push, no agent.
 const GIT_POLL_JOB_KIND = 'git-poll';
@@ -915,7 +963,11 @@ const runJob = async ( job, sessionId ) => {
     await push( { extract: true, sessionId, branch: branch ?? await git( 'rev-parse --abbrev-ref HEAD' ), dir, worktree: true, onStep } );
     // The agent's step is beaten before claude is spawned.
     await onStep( 'agent' );
-    return runAgent( { ...job, tools: [ ...tools, ...optionalTools.filter( ( tool ) => !tools.includes( tool ) ) ] }, sessionId, dir, method, optionalTools, relay.push );
+    // Blueprint ADR-135: the team's --design-tools join the served and optional tools, each once.
+    const granted = [ ...new Set( [ ...tools, ...optionalTools, ...designTools ] ) ];
+    const outcome = await runAgent( { ...job, tools: granted }, sessionId, dir, method, optionalTools, relay.push );
+    await logLeftovers( job, dir );
+    return outcome;
   };
   // A step that throws (an extraction that fails) fails the job all the same; its end is posted before the report.
   let outcome = { ok: false };
