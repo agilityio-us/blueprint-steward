@@ -262,7 +262,9 @@ const mapOptionSchema = z.object({
     kind: z.enum( vocabulary( WALK_KINDS )).optional(),
     given: z.string().optional(),
     when: z.string().optional(),
-    then: z.string().optional()
+    then: z.string().optional(),
+    // BP-229 (D6): declared here or zod strips it before the post is sent.
+    rejection: z.object({ code: z.string().optional() }).optional()
   })),
   rejectedBecause: z.string().optional(),
   evidence: z.array( z.string() ).optional()
@@ -348,7 +350,8 @@ const scenarioBodyShape = {
     columns: z.array( z.string() ),
     rows: z.array( z.array( z.string() ))
   }).passthrough().optional(),
-  supersedes: mapIdSchema.optional()
+  supersedes: mapIdSchema.optional(),
+  rejection: z.object({ code: z.string().optional() }).passthrough().optional()
 };
 
 const mapProposeScenarioInputSchema = z.object( scenarioBodyShape ).passthrough();
