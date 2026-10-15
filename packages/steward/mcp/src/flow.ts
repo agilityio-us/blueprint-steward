@@ -29,6 +29,7 @@ export type FlowNodeView = {
   foreign?: true;
   resourceKey?: string;
   queries?: string[];
+  tags?: string[];
   origin?: Origin;
   status?: DesignStatus;
   previousLabel?: string;
@@ -72,6 +73,7 @@ function toNodeView( node: BlueprintNode, row: number, foreign: boolean ): FlowN
     ...( foreign ? { foreign: true as const } : {}),
     ...( node.resourceKey !== undefined ? { resourceKey: node.resourceKey } : {}),
     ...( node.queries !== undefined ? { queries: node.queries.map( query => query.route ) } : {}),
+    ...( node.tags !== undefined ? { tags: node.tags } : {}),
     ...( node.origin !== undefined && node.origin !== 'extracted' ? { origin: node.origin } : {}),
     ...( node.status !== undefined ? { status: node.status } : {}),
     ...( node.previousLabel !== undefined ? { previousLabel: node.previousLabel } : {}),
