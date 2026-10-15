@@ -1114,6 +1114,113 @@ setInterval(() => {}, 1000);
   }, 30_000 );
 } );
 
+// Blueprint ADR-136: a repository declares its design plugins in .blueprint.config.json designTooling.designPlugins,
+// each a git source pinned to a commit sha. Steward reads them from the session's worktree (else the remote default
+// branch's config), fetches each source at its sha into <repo>.blueprint-worktrees/.plugins, adds one --plugin-dir per
+// plugin after the method's, and fails the job method-not-loaded when claude's init does not list them all.
+describe( 'blueprint-steward start: the repository\'s design plugins', () => {
+  const SERVED = { text: '/blueprint-method:turn Served hosted-turn text.', version: 3, sha256: 'a'.repeat( 64 ) };
+  const designJob = ( id: string ) => ( {
+    id, kind: 'design', sessionId: `sess-${ id }`, branch: 'feature', prompt: null, jobKey: `bpjk_minted-for-${ id }`, instructions: SERVED, method: METHOD,
+    tools: [ 'mcp__blueprint', 'Read', 'Glob', 'Grep' ],
+  } );
+  const commit = ( cwd: string, message: string ) => execSync( `git -c user.email=t@t -c user.name=t add -A && git -c user.email=t@t -c user.name=t commit -qm ${ JSON.stringify( message ) }`, { cwd } );
+  // A marketplace repository listing the plugin `ddd` at ./plugins/ddd, and its head sha.
+  const makeMarketplace = () => {
+    const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-marketplace-' ) );
+    mkdirSync( join( dir, '.claude-plugin' ) );
+    writeFileSync( join( dir, '.claude-plugin', 'marketplace.json' ), JSON.stringify( { name: 'marketplace', plugins: [ { name: 'ddd', source: './plugins/ddd' } ] } ) );
+    mkdirSync( join( dir, 'plugins', 'ddd', '.claude-plugin' ), { recursive: true } );
+    writeFileSync( join( dir, 'plugins', 'ddd', '.claude-plugin', 'plugin.json' ), JSON.stringify( { name: 'ddd', version: '0.2.0' } ) );
+    execSync( 'git init -q -b master', { cwd: dir } );
+    commit( dir, 'marketplace' );
+    return { source: dir, ref: execSync( 'git rev-parse HEAD', { cwd: dir, encoding: 'utf-8' } ).trim() };
+  };
+  // A repo whose `feature` branch (the job's) declares `designPlugins`, or, with onMain, whose origin main alone does.
+  const repoDeclaring = ( designPlugins: unknown, { onMain = false } = {} ) => {
+    const repo = makeRepo();
+    const extract = ( JSON.parse( readFileSync( join( repo, '.blueprint.config.json' ), 'utf-8' ) ) as { designTooling: { extract: string } } ).designTooling.extract;
+    const config = JSON.stringify( { designTooling: { extract, designPlugins } } );
+    if ( onMain ) {
+      writeFileSync( join( repo, '.blueprint.config.json' ), config );
+      commit( repo, 'declare design plugins' );
+      execSync( 'git push -q origin main', { cwd: repo } );
+    } else {
+      execSync( 'git checkout -q feature', { cwd: repo } );
+      writeFileSync( join( repo, '.blueprint.config.json' ), config );
+      commit( repo, 'declare design plugins' );
+      execSync( 'git checkout -q main', { cwd: repo } );
+    }
+    return repo;
+  };
+  // The captured 2.1.287 init with `names` added to its plugins.
+  const initListing = ( ...names: string[] ) => {
+    const init = JSON.parse( INIT_LINE ) as { plugins: { name: string }[] };
+    return JSON.stringify( { ...init, plugins: [ ...init.plugins, ...names.map( ( name ) => ( { name, path: `/inline/${ name }`, source: `${ name }@inline` } ) ) ] } );
+  };
+  const claudeWriting = ( init: string ) => {
+    const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-claude-' ) );
+    const record = join( dir, 'record.json' );
+    const script = join( dir, 'claude.mjs' );
+    writeFileSync( script, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${ JSON.stringify( record ) }, JSON.stringify({ argv: process.argv.slice(2) }));
+process.stdout.write(${ JSON.stringify( `${ init }\n` ) });
+setTimeout(() => process.exit(0), 300);
+` );
+    execSync( `chmod +x ${ script }` );
+    return { script, record };
+  };
+  const runOn = async ( repo: string, id: string, init: string ) => {
+    const host = await fakeHost( ( req ) => ( req.url === '/api/blueprint/steward/claim' ? { body: { job: designJob( id ) } } : {} ) );
+    const claude = claudeWriting( init );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
+    expect( r.code ).toBe( 0 );
+    const argv = existsSync( claude.record ) ? ( JSON.parse( readFileSync( claude.record, 'utf-8' ) ) as { argv: string[] } ).argv : undefined;
+    const pluginDirs = argv?.flatMap( ( arg, i ) => ( arg === '--plugin-dir' ? [ argv[ i + 1 ] ] : [] ) );
+    const report = host.requests.filter( ( q ) => q.url === `/api/blueprint/steward/jobs/${ id }` ).map( ( q ) => q.body );
+    return { pluginDirs, report, stderr: r.stderr };
+  };
+
+  it( 'a declared plugin is fetched at its sha and handed to claude as a second --plugin-dir; an init listing both runs to done, one listing only the method fails method-not-loaded', async () => {
+    const { source, ref } = makeMarketplace();
+    const repo = repoDeclaring( [ { source, ref, plugin: 'ddd' } ] );
+    const loaded = await runOn( repo, 'jd', initListing( 'ddd' ) );
+    const fetched = join( `${ repo }.blueprint-worktrees`, '.plugins', `${ sha256Of( Buffer.from( source ) ).slice( 0, 16 ) }-${ ref }` );
+    expect( [ loaded.pluginDirs?.length, loaded.pluginDirs?.[ 1 ], loaded.report.map( ( b ) => [ b.status, b.reason ] ) ] )
+      .toEqual( [ 2, join( fetched, 'plugins', 'ddd' ), [ [ 'done', undefined ] ] ] );
+    expect( execSync( 'git rev-parse HEAD', { cwd: fetched, encoding: 'utf-8' } ).trim() ).toBe( ref );
+
+    const missing = await runOn( repo, 'jn', INIT_LINE );
+    expect( missing.report.map( ( b ) => [ b.status, b.reason ] ) ).toEqual( [ [ 'failed', 'method-not-loaded' ] ] );
+    expect( missing.report[ 0 ].result ).toContain( 'blueprint-method, ddd' );
+  }, 40_000 );
+
+  it( 'a session branch whose config has no designPlugins key takes the remote default branch\'s', async () => {
+    const { source, ref } = makeMarketplace();
+    const { pluginDirs, report } = await runOn( repoDeclaring( [ { source, ref, plugin: 'ddd' } ], { onMain: true } ), 'jm', initListing( 'ddd' ) );
+    expect( [ pluginDirs?.length, report.map( ( b ) => [ b.status, b.reason ] ) ] ).toEqual( [ 2, [ [ 'done', undefined ] ] ] );
+  }, 30_000 );
+
+  it( 'a ref that is no full sha fails config-invalid, an unreachable source or an unknown plugin fails method-unavailable; none spawns claude', async () => {
+    const { source, ref } = makeMarketplace();
+    for ( const [ declared, reason ] of [
+      [ [ { source, ref: 'master', plugin: 'ddd' } ], 'config-invalid' ],
+      [ [ { source: join( tmpdir(), 'no-such-marketplace' ), ref, plugin: 'ddd' } ], 'method-unavailable' ],
+      [ [ { source, ref, plugin: 'coil' } ], 'method-unavailable' ],
+    ] as const ) {
+      const { pluginDirs, report } = await runOn( repoDeclaring( declared ), 'jr', initListing( 'ddd' ) );
+      expect( [ declared[ 0 ].plugin, declared[ 0 ].ref.length, pluginDirs, report.map( ( b ) => [ b.status, b.reason ] ) ] )
+        .toEqual( [ declared[ 0 ].plugin, declared[ 0 ].ref.length, undefined, [ [ 'failed', reason ] ] ] );
+    }
+  }, 60_000 );
+
+  it( 'a repository declaring none runs the method alone', async () => {
+    const { pluginDirs, report } = await runOn( makeRepo(), 'j0', INIT_LINE );
+    expect( [ pluginDirs?.length, report.map( ( b ) => [ b.status, b.reason ] ) ] ).toEqual( [ 1, [ [ 'done', undefined ] ] ] );
+  }, 30_000 );
+} );
+
 // A design claim names mcp__blueprint_repo as an optional tool. Steward
 // starts blueprint-repo-mcp (MCP server `blueprint_repo`, so its tools are the entry contract's
 // mcp__blueprint_repo__git_*) only when its --tool-ceiling admits it, and otherwise runs the job without it.

@@ -44,6 +44,9 @@ your declared reader) ever leave this machine; source never does. The server nev
             A design job's method plugin is downloaded from the host, checked against the sha256 its claim names,
             kept (at most 5) in <repo>.blueprint-worktrees/.method and loaded with claude --plugin-dir; a job whose
             plugin is missing, unavailable, of another sha256 or not loaded by claude fails rather than run without it.
+            The plugins the repository declares in .blueprint.config.json designTooling.designPlugins (a git source
+            pinned to a commit sha each) are fetched into <repo>.blueprint-worktrees/.plugins with Steward's own git
+            credentials and loaded beside the method, and fail the job the same way.
             Up to --concurrency jobs run at once; with every slot full it still claims observability reads, which
             run the repository's declared observability.read command (30 s each). The --repo checkout's HEAD and
             working tree are never changed.
@@ -571,14 +574,16 @@ const beatStep = async ( job, step ) => {
 // over, and the first line that is not one decides: true for an init listing the method; false for an init without
 // it, or for any other line (a non-system event, plain text, an init with no plugins list), which means the method
 // did not load. undefined for a line that does not decide; an init renamed to another system subtype is passed over
-// too, and the next line or the exit then fails the job.
-const methodLoadedBy = ( line, name ) => {
+// too, and the next line or the exit then fails the job. `names` is the method's and every design plugin's (ADR-136):
+// the init must list them all.
+const methodLoadedBy = ( line, names ) => {
   const event = eventOf( line );
   if ( event?.type === 'system' && event.subtype !== 'init' ) return undefined;
-  return event?.type === 'system' && event.subtype === 'init' && Array.isArray( event.plugins ) && event.plugins.some( ( plugin ) => plugin?.name === name );
+  return event?.type === 'system' && event.subtype === 'init' && Array.isArray( event.plugins )
+    && names.every( ( name ) => event.plugins.some( ( plugin ) => plugin?.name === name ) );
 };
 
-const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActivity = () => undefined ) => new Promise( ( resolvePromise ) => {
+const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActivity = () => undefined, designPlugins = [] ) => new Promise( ( resolvePromise ) => {
   // The board tool writes with the key the host minted for this job alone, never the org key. A
   // claim with none (a host from before job keys) is failed rather than handing the agent the org key.
   if ( typeof job.jobKey !== 'string' || job.jobKey === '' ) {
@@ -629,6 +634,8 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     // The verified method zip, loaded for this run alone; stream-json (which -p accepts only with --verbose)
     // so the init event shows whether claude loaded it.
     '--plugin-dir', method.path,
+    // Blueprint ADR-136: the repository's design plugins, each fetched at its pinned sha.
+    ...designPlugins.flatMap( ( plugin ) => [ '--plugin-dir', plugin.path ] ),
     '--output-format', 'stream-json', '--verbose',
     ...model,
     ...cap,
@@ -653,10 +660,12 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
   // (methodLoadedBy), and `scanned` is how far into `out` the lines have been read.
   let loaded;
   let scanned = 0;
+  const required = [ method.name, ...designPlugins.map( ( plugin ) => plugin.name ) ];
+  const shown = required.length === 1 ? `the ${ method.name } plugin` : `the plugins ${ required.join( ', ' ) }`;
   const scanLines = () => {
     let end;
     while ( loaded === undefined && ( end = out.indexOf( '\n', scanned ) ) !== -1 ) {
-      loaded = methodLoadedBy( out.slice( scanned, end ), method.name );
+      loaded = methodLoadedBy( out.slice( scanned, end ), required );
       scanned = end + 1;
     }
   };
@@ -698,7 +707,7 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     if ( loaded !== undefined ) return;
     scanLines();
     if ( loaded === false ) {
-      console.error( `blueprint-steward: the agent's init event does not list the ${ method.name } plugin; stopping the agent of job ${ job.id }` );
+      console.error( `blueprint-steward: the agent's init event does not list ${ shown }; stopping the agent of job ${ job.id }` );
       stop( 'method-not-loaded' );
     }
   } );
@@ -721,10 +730,10 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     // output is claude's own failure.
     if ( loaded === undefined ) {
       scanLines();
-      if ( loaded === undefined && scanned < out.length ) loaded = methodLoadedBy( out.slice( scanned ), method.name );
+      if ( loaded === undefined && scanned < out.length ) loaded = methodLoadedBy( out.slice( scanned ), required );
     }
     if ( stopped === 'method-not-loaded' || ( !loaded && ( code === 0 || out !== '' ) ) ) {
-      finish( { ok: false, reason: 'method-not-loaded', result: `the agent did not show the ${ method.name } plugin (sha256 ${ method.sha256 }) loaded at init; the turn was not run on it\n${ out.slice( -4000 ) }`, usage: { cost_source: 'unreported' } } );
+      finish( { ok: false, reason: 'method-not-loaded', result: `the agent did not show ${ shown } (method sha256 ${ method.sha256 }) loaded at init; the turn was not run on it\n${ out.slice( -4000 ) }`, usage: { cost_source: 'unreported' } } );
       return;
     }
     const pinned = pinnedResult( out );
@@ -822,6 +831,103 @@ const methodFor = async ( job ) => {
   renameSync( partial, path );
   pruneMethodCache();
   return { path, name: method.name, sha256: method.sha256 };
+};
+
+// Blueprint ADR-136: the plugins a repository declares for its design jobs, in .blueprint.config.json
+// designTooling.designPlugins, each { source: a git URL, ref: a full commit sha, plugin: its name, path?: its directory
+// in the source }. They are read from the session's worktree; a worktree whose config has no designPlugins key (a
+// branch cut before the declaration) takes the remote default branch's. Each is fetched at its sha into a directory
+// beside the method cache, under this Steward's own git credentials (the server never clones, ADR-100), and loaded
+// with --plugin-dir beside the method; like the method, one claude's init does not list fails the job. A path left
+// out is read from the source's .claude-plugin/marketplace.json, the entry whose name is the plugin's.
+const DESIGN_PLUGIN_CACHE = join( WORKTREE_ROOT, '.plugins' );
+const DESIGN_PLUGIN_CACHE_SIZE = 5;
+const GIT_SHA = /^[0-9a-f]{40}$/;
+const DONE_MARK = '.blueprint-steward-fetched';
+const pluginRefused = ( reason, result ) => ( { refused: { ok: false, reason, result } } );
+const declaredPluginsIn = async ( dir ) => {
+  const configPath = join( dir, '.blueprint.config.json' );
+  const own = existsSync( configPath ) ? JSON.parse( readFileSync( configPath, 'utf-8' ) ).designTooling : undefined;
+  if ( own !== undefined && Object.hasOwn( own, 'designPlugins' ) ) return { declared: own.designPlugins, from: configPath };
+  const base = await remoteDefaultBranch();
+  if ( !base ) return { declared: undefined };
+  const shown = await runGit( repo, [ 'show', `refs/remotes/origin/${ base }:.blueprint.config.json` ] );
+  if ( shown.status !== 0 ) return { declared: undefined };
+  return { declared: JSON.parse( shown.stdout ).designTooling?.designPlugins, from: `origin/${ base }:.blueprint.config.json` };
+};
+const pruneDesignPluginCache = () => {
+  const kept = readdirSync( DESIGN_PLUGIN_CACHE ).filter( ( name ) => !name.includes( '.partial' ) )
+    .map( ( name ) => ( { path: join( DESIGN_PLUGIN_CACHE, name ), usedAt: statSync( join( DESIGN_PLUGIN_CACHE, name ) ).mtimeMs } ) )
+    .sort( ( a, b ) => b.usedAt - a.usedAt );
+  for ( const { path } of kept.slice( DESIGN_PLUGIN_CACHE_SIZE ) ) rmSync( path, { recursive: true, force: true } );
+};
+const fetchPluginSource = async ( source, ref ) => {
+  const dir = join( DESIGN_PLUGIN_CACHE, `${ sha256Of( source ).slice( 0, 16 ) }-${ ref }` );
+  if ( existsSync( join( dir, DONE_MARK ) ) ) {
+    const now = new Date();
+    utimesSync( dir, now, now );
+    return dir;
+  }
+  if ( existsSync( dir ) ) rmSync( dir, { recursive: true, force: true } );
+  mkdirSync( DESIGN_PLUGIN_CACHE, { recursive: true } );
+  // Fetched whole under another name and renamed, so a job reading the cache never sees part of a checkout.
+  const partial = `${ dir }.${ process.pid }-${ methodWrites += 1 }.partial`;
+  mkdirSync( partial );
+  const step = async ( argv ) => {
+    const out = await runQueued( DESIGN_PLUGIN_CACHE, 'git', argv, { cwd: partial } );
+    if ( out.status !== 0 ) throw new Error( `git ${ argv[ 0 ] } failed: ${ gitFailure( out ) }` );
+    return out.stdout.trim();
+  };
+  try {
+    await step( [ 'init', '--quiet' ] );
+    await step( [ 'fetch', '--quiet', '--depth', '1', source, ref ] );
+    await step( [ 'checkout', '--quiet', '--detach', 'FETCH_HEAD' ] );
+    const head = await step( [ 'rev-parse', 'HEAD' ] );
+    if ( head !== ref ) throw new Error( `fetched ${ head }, not ${ ref }` );
+    writeFileSync( join( partial, DONE_MARK ), `${ source } ${ ref }\n` );
+    renameSync( partial, dir );
+  } finally {
+    rmSync( partial, { recursive: true, force: true } );
+  }
+  pruneDesignPluginCache();
+  return dir;
+};
+// The plugins' directories and names, or `refused`: the outcome the job fails with before its push and agent.
+const designPluginsFor = async ( dir ) => {
+  let declared, from;
+  try {
+    ( { declared, from } = await declaredPluginsIn( dir ) );
+  } catch ( err ) {
+    return pluginRefused( 'config-invalid', `the design plugins could not be read: ${ err.message }` );
+  }
+  if ( declared === undefined ) return [];
+  const valid = Array.isArray( declared ) && declared.every( ( entry ) => typeof entry?.source === 'string' && entry.source !== ''
+    && typeof entry.ref === 'string' && GIT_SHA.test( entry.ref ) && typeof entry.plugin === 'string' && entry.plugin !== ''
+    && ( entry.path === undefined || typeof entry.path === 'string' ) );
+  if ( !valid ) {
+    return pluginRefused( 'config-invalid', `designTooling.designPlugins in ${ from } must be a list of { source, ref (a full commit sha), plugin, path? }` );
+  }
+  const plugins = [];
+  for ( const { source, ref, plugin, path } of declared ) {
+    let checkout;
+    try {
+      checkout = await fetchPluginSource( source, ref );
+    } catch ( err ) {
+      return pluginRefused( 'method-unavailable', `the design plugin ${ plugin } (${ source } at ${ ref }) could not be fetched: ${ err.message }` );
+    }
+    let relative = path;
+    if ( relative === undefined ) {
+      const marketplace = join( checkout, '.claude-plugin', 'marketplace.json' );
+      const listed = existsSync( marketplace ) ? JSON.parse( readFileSync( marketplace, 'utf-8' ) ).plugins?.find( ( entry ) => entry?.name === plugin ) : undefined;
+      relative = typeof listed?.source === 'string' ? listed.source : undefined;
+    }
+    const pluginDir = relative === undefined ? undefined : resolve( checkout, relative );
+    if ( pluginDir === undefined || !( pluginDir === checkout || pluginDir.startsWith( `${ checkout }/` ) ) || !existsSync( join( pluginDir, '.claude-plugin', 'plugin.json' ) ) ) {
+      return pluginRefused( 'method-unavailable', `the design plugin ${ plugin } is not a plugin directory in ${ source } at ${ ref }${ relative === undefined ? ' (no path, and no marketplace.json entry of that name)' : ` (${ relative })` }` );
+    }
+    plugins.push( { path: pluginDir, name: plugin } );
+  }
+  return plugins;
 };
 const gitFailure = ( result ) => ( result.stderr || result.error?.message || `exit ${ result.status }` ).trim();
 const commonDirOf = async ( cwd ) => {
@@ -960,12 +1066,14 @@ const runJob = async ( job, sessionId ) => {
     } catch ( err ) {
       return { ok: false, reason: err.reason ?? 'checkout-failed', result: err.message };
     }
+    const designPlugins = await designPluginsFor( dir );
+    if ( designPlugins.refused ) return designPlugins.refused;
     await push( { extract: true, sessionId, branch: branch ?? await git( 'rev-parse --abbrev-ref HEAD' ), dir, worktree: true, onStep } );
     // The agent's step is beaten before claude is spawned.
     await onStep( 'agent' );
     // Blueprint ADR-135: the team's --design-tools join the served and optional tools, each once.
     const granted = [ ...new Set( [ ...tools, ...optionalTools, ...designTools ] ) ];
-    const outcome = await runAgent( { ...job, tools: granted }, sessionId, dir, method, optionalTools, relay.push );
+    const outcome = await runAgent( { ...job, tools: granted }, sessionId, dir, method, optionalTools, relay.push, designPlugins );
     await logLeftovers( job, dir );
     return outcome;
   };
