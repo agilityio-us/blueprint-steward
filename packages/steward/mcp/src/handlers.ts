@@ -75,7 +75,14 @@ import type {
   StrandingFailure,
   StrandingReport
 } from '@bett3r-dev/blueprint-schema';
-import { BLUEPRINT_OVERRIDES_FILENAME, cardsForChannel, joinForkScenarios, strandingFailure, withExampleArrays } from '@bett3r-dev/blueprint-schema';
+import {
+  BLUEPRINT_OVERRIDES_FILENAME,
+  cardsForChannel,
+  joinForkScenarios,
+  normaliseTags,
+  strandingFailure,
+  withExampleArrays
+} from '@bett3r-dev/blueprint-schema';
 
 import type { BoardMark, BoardMarksRead } from './board-marks.js';
 import { capabilitiesAdvertisement, type CapabilitiesAdvertisement } from './capabilities.js';
@@ -159,7 +166,8 @@ function targetOf( context: HandlerContext ): BlueprintTarget {
 }
 
 export type ProposeArgs = {
-  nodes?: ProposeNodeInput[];
+  // BP-279: the propose zod takes tags; blueprint-spec 1.1.0's ProposeNodeInput predates them.
+  nodes?: ( ProposeNodeInput & { tags?: string[] })[];
   edges?: ProposeEdgeInput[];
 };
 
@@ -253,6 +261,11 @@ async function runWrite<Result>(
   }
 }
 
+// BP-279: the hosted door stores tags as sent (attributedDesignPayload), so the tool sends them normalised.
+function withNormalisedTags<Fields extends { tags?: string[] }>( fields: Fields ): Fields {
+  return fields.tags === undefined ? fields : { ...fields, tags: normaliseTags( fields.tags ) };
+}
+
 export async function proposeHandler(
   context: HandlerContext,
   args: ProposeArgs
@@ -260,7 +273,7 @@ export async function proposeHandler(
   return runWrite( async () => {
     const store = targetOf( context );
     const { seq, design, nodeIds, strandedProposals, strandingError, findings } = await store.propose({
-      ...( args.nodes !== undefined ? { nodes: args.nodes } : {}),
+      ...( args.nodes !== undefined ? { nodes: args.nodes.map( withNormalisedTags ) } : {}),
       ...( args.edges !== undefined ? { edges: args.edges } : {}),
       author: 'ai'
     });
@@ -286,7 +299,8 @@ export async function modifyHandler(
   return runWrite( async () => {
     const store = targetOf( context );
     const { seq, design, findings } = await store.modify({
-      entries: args.entries ?? [],
+      entries: ( args.entries ?? []).map( entry =>
+        entry.set === undefined ? entry : { ...entry, set: withNormalisedTags( entry.set ) }),
       author: 'ai'
     });
     return {
