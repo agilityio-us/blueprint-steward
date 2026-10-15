@@ -133,6 +133,7 @@ const proposeInputShape = {
     subdomain: z.string(),
     resourceKey: z.string().optional(),
     queries: z.array( querySchema ).optional(),
+    tags: z.array( z.string() ).optional(),
     note: z.string().optional()
   })).optional(),
   edges: z.array( proposeEdgeSchema ).optional()
@@ -145,7 +146,8 @@ const modifyInputShape = {
       label: z.string().optional(),
       subdomain: z.string().optional(),
       resourceKey: z.string().optional(),
-      queries: z.array( querySchema ).optional()
+      queries: z.array( querySchema ).optional(),
+      tags: z.array( z.string() ).optional()
     }).passthrough(),
     note: z.string().optional()
   }))

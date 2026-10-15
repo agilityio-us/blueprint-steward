@@ -339,4 +339,45 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
 
     await client.close();
   });
+
+  it( 'Given propose node with tags [\'keyed\'] for Listing Visits Recorder when the tool runs then the submission carries the tags and the stored node has tags [\'keyed\'] (BP-279 T3)', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({ name: 'propose', arguments: {
+      nodes: [ { type: 'system', label: 'Listing Visits Recorder', subdomain: 'sales', tags: [ 'keyed' ] } ]
+    } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect(( submits[ 0 ].args as { nodes: { tags?: string[] }[] } ).nodes[ 0 ].tags ).toEqual( [ 'keyed' ] );
+    expect( host.design.propose?.nodes?.[ 0 ]?.tags ).toEqual( [ 'keyed' ] );
+
+    await client.close();
+  });
+
+  it( 'Given a session whose design tags a proposed system keyed when get_flow and get_design run then the node carries tags [\'keyed\'] (BP-279 T3)', async () => {
+    mkdirSync( join( repoPath, '.blueprint' ), { recursive: true });
+    writeFileSync( join( repoPath, '.blueprint', 'graph.json' ), JSON.stringify( GRAPH ), 'utf-8' );
+    const ts = new Date( 0 ).toISOString();
+    const recorder = proposedNodeId({ subdomain: 'sales', type: 'system', label: 'Listing Visits Recorder' });
+    const host = createFakeHost({ design: {
+      schemaVersion: 1,
+      propose: {
+        nodes: [ { type: 'system', label: 'Listing Visits Recorder', subdomain: 'sales', tags: [ 'keyed' ], author: 'human', ts } ],
+        edges: [ { from: PLACE, to: recorder, kind: 'handled-by', author: 'human', ts } ]
+      }
+    } });
+    const client = await connect( host );
+
+    const flow = toolBody( await client.callTool({ name: 'get_flow', arguments: { rootCommand: PLACE } }));
+    const design = toolBody( await client.callTool({ name: 'get_design', arguments: {} }));
+
+    const nodes = flow.nodes as { id: string; tags?: string[] }[];
+    expect( nodes.find( node => node.id === recorder )?.tags ).toEqual( [ 'keyed' ] );
+    expect( nodes.find( node => node.id === PLACE )).not.toHaveProperty( 'tags' );
+    expect(( design.design as DesignFile ).propose?.nodes?.[ 0 ]?.tags ).toEqual( [ 'keyed' ] );
+
+    await client.close();
+  });
 });
