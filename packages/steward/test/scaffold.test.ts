@@ -220,7 +220,6 @@ const scaffoldAt = async ( fx: Fixture, sha: string ) => {
 };
 const messageOf = ( fx: Fixture, rev: string ) => sh( fx.origin, `git log -1 --format=%B ${ rev }` ).trim();
 const reportAt = ( fx: Fixture, rev: string ) => JSON.parse( showAt( fx, rev, REPORT ) ?? 'null' ) as Record<string, unknown> | null;
-
 const EVENT_STUB = ( name: string ) => `// scaffolded\nexport const ${ name } = 'TODO';\n`;
 const TODO_TEST = `import { describe, it } from 'vitest';\n\ndescribe( 'OrderPlaced', () => {\n  it.todo( 'SC-1: an order is placed' );\n} );\n`;
 const PLACED_LINE = 'export * from \'./OrderPlaced.event\';';
@@ -376,6 +375,24 @@ describe( 'blueprint-steward scaffold job', () => {
     expect( reportAt( fx, tip ) ).toMatchObject( { status: 'blocked', asked: [ { node: 'p1', question: question.question } ] } );
   }, 120_000 );
 
+  it( 'Given the fake scaffolder exits 3 only on units with no template, when the job runs, then they are still owed and the report says done', async () => {
+    // GIVEN
+    const fx = makeFixture();
+    const sha1 = originTip( fx );
+    const noTemplate = { code: 'no-template', question: 'node type \'ui\' has no template', needed: 'hand-authoring, or a new template' };
+    writePlan( fx, { ...FIRST_PLAN, exit: 3, skipped: [ { node: 'ui1', reason: 'blocked', detail: 'node type \'ui\' has no template', decisions: [ noTemplate ] } ] } );
+
+    // WHEN
+    const outcome = await scaffoldAt( fx, sha1 );
+
+    // THEN
+    const tip = originTip( fx );
+    expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha, asked: outcome.result?.asked } )
+      .toEqual( { status: 'done', outcome: 'done', committed: true, commitSha: tip, asked: [] } );
+    expect( outcome.result?.stillOwed ).toContainEqual( { node: 'ui1', reason: 'no-template', detail: 'node type \'ui\' has no template' } );
+    expect( reportAt( fx, tip ) ).toMatchObject( { status: 'done' } );
+  }, 120_000 );
+
   it( 'Given the scaffolder exits 1, when the job runs, then the job fails and origin\'s tip is unmoved', async () => {
     const fx = makeFixture();
     const sha1 = originTip( fx );
@@ -505,5 +522,21 @@ describe( 'blueprint-steward scaffold job', () => {
     // THEN
     expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha, resumed: outcome.result?.resumed, runs: argvLog( fx ).length } )
       .toEqual( { status: 'done', outcome: 'blocked', committed: true, commitSha: landed, resumed: true, runs: 1 } );
+  }, 120_000 );
+
+  it( 'Given a landed scaffold whose report says blocked only on no-template units, when the job runs again for the base commit, then the resumed report says done', async () => {
+    // GIVEN: the scaffold commit an older Steward landed on the base commit, its report stating blocked for a no-template unit alone
+    const fx = makeFixture();
+    const sha1 = originTip( fx );
+    const noTemplate = { code: 'no-template', question: 'node type \'ui\' has no template', needed: 'hand-authoring, or a new template' };
+    const scaffolder = { files: [], appends: [], skipped: [ { node: 'ui1', reason: 'blocked', detail: 'node type \'ui\' has no template', decisions: [ noTemplate ] } ] };
+    const landed = devCommit( fx, { [ REPORT ]: `${ JSON.stringify( { version: 1, status: 'blocked', mode: 'hosted-cli', ticket: KEY, baseSha: sha1, scaffolder } ) }\n` }, `scaffold(${ KEY }): stubs` );
+
+    // WHEN
+    const outcome = await scaffoldAt( fx, sha1 );
+
+    // THEN
+    expect( { status: outcome.status, outcome: outcome.result?.outcome, commitSha: outcome.result?.commitSha, resumed: outcome.result?.resumed } )
+      .toEqual( { status: 'done', outcome: 'done', commitSha: landed, resumed: true } );
   }, 120_000 );
 } );
