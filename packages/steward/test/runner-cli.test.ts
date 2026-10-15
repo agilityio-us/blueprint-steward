@@ -1165,6 +1165,101 @@ describe( 'blueprint-steward start: the optional repo history tool', () => {
   }, 40_000 );
 } );
 
+// Blueprint ADR-135: the team grants every design job tools beyond the served ones with --design-tools (or
+// $BLUEPRINT_STEWARD_DESIGN_TOOLS), held to --tool-ceiling and to --design-writes at startup, and Steward logs what the
+// agent left in the session's worktree.
+describe( 'blueprint-steward start: the team\'s design tools (Blueprint ADR-135)', () => {
+  const SERVED = { text: '/blueprint-method:turn Served hosted-turn text.', version: 3, sha256: 'a'.repeat( 64 ) };
+  const designJob = ( id: string ) => ( {
+    id, kind: 'design', sessionId: `sess-${ id }`, branch: 'feature', prompt: null, jobKey: `bpjk_minted-for-${ id }`, instructions: SERVED, method: METHOD,
+    tools: [ 'mcp__blueprint', 'Read', 'Glob', 'Grep' ], disallowedTools: [ 'mcp__blueprint__start_map_session' ], optionalTools: [ 'mcp__blueprint_repo' ],
+  } );
+  // A fake claude that, like makeFakeClaude's, records its argv; `leave` names a file it writes into its cwd first.
+  const makeClaude = ( leave?: string ) => {
+    const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-claude-' ) );
+    const record = join( dir, 'record.json' );
+    const script = join( dir, 'claude.mjs' );
+    writeFileSync( script, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${ JSON.stringify( record ) }, JSON.stringify({ argv: process.argv.slice(2) }));
+${ leave ? `writeFileSync(${ JSON.stringify( leave ) }, 'scratch');` : '' }
+${ printInit }
+console.log('fake agent output');
+` );
+    chmodSync( script, 0o755 );
+    return { script, record };
+  };
+  const runWith = async ( rest: string[], { env = {}, leave }: { env?: Record<string, string>; leave?: string } = {} ) => {
+    const job = designJob( 'jd' );
+    const host = await fakeHost( ( req ) => ( req.url === '/api/blueprint/steward/claim' ? { body: { job } } : {} ) );
+    const claude = makeClaude( leave );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...rest ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...env } );
+    const argv = existsSync( claude.record ) ? ( JSON.parse( readFileSync( claude.record, 'utf-8' ) ) as { argv: string[] } ).argv : undefined;
+    const argOf = ( name: string ) => ( argv?.includes( name ) ? argv[ argv.indexOf( name ) + 1 ] : `<${ name } absent>` );
+    const report = host.requests.filter( ( q ) => q.url === '/api/blueprint/steward/jobs/jd' ).map( ( q ) => q.body.status );
+    return { r, spawned: argv !== undefined, allowed: argOf( '--allowedTools' ), builtIn: argOf( '--tools' ), report, requests: host.requests.length };
+  };
+
+  it( 'with no grant a design job runs on the served tools alone, as before', async () => {
+    const plain = await runWith( [] );
+    expect( [ plain.allowed, plain.builtIn, plain.report ] ).toEqual( [ 'mcp__blueprint Read Glob Grep mcp__blueprint_repo', 'Read,Glob,Grep', [ 'done' ] ] );
+  }, 30_000 );
+
+  it( '--design-tools "Bash Skill", or the same list in $BLUEPRINT_STEWARD_DESIGN_TOOLS, joins the served tools once each: pre-approved and available as built-ins', async () => {
+    for ( const [ rest, env ] of [ [ [ '--design-tools', 'Bash Skill Read' ], {} ], [ [], { BLUEPRINT_STEWARD_DESIGN_TOOLS: 'Bash,Skill,Read' } ] ] as const ) {
+      const granted = await runWith( [ ...rest ], { env } );
+      expect( [ rest, granted.allowed, granted.builtIn, granted.report ] ).toEqual( [
+        rest, 'mcp__blueprint Read Glob Grep mcp__blueprint_repo Bash Skill', 'Read,Glob,Grep,Bash,Skill', [ 'done' ],
+      ] );
+    }
+  }, 40_000 );
+
+  it( 'the flag wins over the environment, and an empty environment variable is no grant', async () => {
+    const flagged = await runWith( [ '--design-tools', 'Skill' ], { env: { BLUEPRINT_STEWARD_DESIGN_TOOLS: 'Bash' } } );
+    expect( flagged.builtIn ).toBe( 'Read,Glob,Grep,Skill' );
+    const blank = await runWith( [], { env: { BLUEPRINT_STEWARD_DESIGN_TOOLS: '' } } );
+    expect( [ blank.builtIn, blank.report ] ).toEqual( [ 'Read,Glob,Grep', [ 'done' ] ] );
+  }, 40_000 );
+
+  it( 'a grant beyond --tool-ceiling exits 1 before any claim; one within it runs', async () => {
+    const beyond = await runWith( [ '--tool-ceiling', 'mcp__blueprint Read Glob Grep', '--design-tools', 'Bash' ] );
+    expect( [ beyond.r.code, beyond.requests, beyond.spawned ] ).toEqual( [ 1, 0, false ] );
+    expect( beyond.r.stderr ).toContain( '--design-tools grants Bash, beyond this Steward\'s --tool-ceiling' );
+    const within = await runWith( [ '--tool-ceiling', 'mcp__blueprint Read Glob Grep Bash', '--design-tools', 'Bash' ] );
+    expect( [ within.r.code, within.builtIn, within.report ] ).toEqual( [ 0, 'Read,Glob,Grep,Bash', [ 'done' ] ] );
+  }, 40_000 );
+
+  it( '--design-writes forbid exits 1 on a granted tool that writes, scoped or bare, and runs a grant that does not', async () => {
+    for ( const tool of [ 'Bash', 'Bash(git *)', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit' ] ) {
+      const refused = await runWith( [ '--design-writes', 'forbid', '--design-tools', `Skill ${ tool }` ] );
+      expect( [ tool, refused.r.code, refused.requests ] ).toEqual( [ tool, 1, 0 ] );
+      expect( refused.r.stderr ).toContain( `--design-writes forbid, but --design-tools grants ${ tool }` );
+    }
+    const readOnly = await runWith( [ '--design-writes', 'forbid', '--design-tools', 'Skill' ], { env: { BLUEPRINT_STEWARD_DESIGN_WRITES: 'allow' } } );
+    expect( [ readOnly.r.code, readOnly.builtIn, readOnly.report ] ).toEqual( [ 0, 'Read,Glob,Grep,Skill', [ 'done' ] ] );
+    // The environment sets it when the flag does not.
+    const fromEnv = await runWith( [ '--design-tools', 'Bash' ], { env: { BLUEPRINT_STEWARD_DESIGN_WRITES: 'forbid' } } );
+    expect( fromEnv.r.code ).toBe( 1 );
+  }, 60_000 );
+
+  it( 'an empty --design-tools, or a --design-writes other than allow or forbid, exits 1 before any claim', async () => {
+    for ( const rest of [ [ '--design-tools', '' ], [ '--design-tools', ' , ' ], [ '--design-tools', '--once' ], [ '--design-writes', 'maybe' ] ] ) {
+      const refused = await runWith( rest );
+      expect( [ rest, refused.r.code, refused.requests ] ).toEqual( [ rest, 1, 0 ] );
+    }
+    const envBlankList = await runWith( [], { env: { BLUEPRINT_STEWARD_DESIGN_TOOLS: ' , ' } } );
+    expect( [ envBlankList.r.code, envBlankList.r.stderr.includes( '--design-tools needs a tool list' ) ] ).toEqual( [ 1, true ] );
+  }, 40_000 );
+
+  it( 'what the agent leaves in the session\'s worktree is logged with its path, and a clean run logs nothing', async () => {
+    const dirty = await runWith( [ '--design-tools', 'Write' ], { leave: 'scratch-notes.md' } );
+    expect( dirty.report ).toEqual( [ 'done' ] );
+    expect( dirty.r.stdout ).toMatch( /the agent left 1 changed path in .*sess-jd; the session's next job discards tracked changes, untracked files stay:\n {2}\?\? scratch-notes\.md/ );
+    const clean = await runWith( [ '--design-tools', 'Write' ] );
+    expect( clean.r.stdout ).not.toContain( 'the agent left' );
+  }, 40_000 );
+} );
+
 // Steward works up to --concurrency
 // sessions at once, each in its own git worktree of the job's branch, leaving the --repo checkout untouched; a
 // drop-worktree job removes a session's worktree, never while an agent runs in it, and the next job recreates it.
