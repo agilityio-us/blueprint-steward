@@ -126,6 +126,10 @@ const querySchema = z.object({
   })
 });
 
+// A node's data shape is forwarded as sent: the blueprint server's design door judges its vocabulary (ADR-127), so the
+// shape is not restated here. Its description is the served text at nodes[].dataShape and entries[].set.dataShape.
+const dataShapeSchema = z.object({}).passthrough();
+
 const proposeInputShape = {
   nodes: z.array( z.object({
     type: z.enum( NODE_TYPE_VALUES ),
@@ -133,6 +137,7 @@ const proposeInputShape = {
     subdomain: z.string(),
     resourceKey: z.string().optional(),
     queries: z.array( querySchema ).optional(),
+    dataShape: dataShapeSchema.optional(),
     note: z.string().optional()
   })).optional(),
   edges: z.array( proposeEdgeSchema ).optional()
@@ -145,7 +150,8 @@ const modifyInputShape = {
       label: z.string().optional(),
       subdomain: z.string().optional(),
       resourceKey: z.string().optional(),
-      queries: z.array( querySchema ).optional()
+      queries: z.array( querySchema ).optional(),
+      dataShape: dataShapeSchema.optional()
     }).passthrough(),
     note: z.string().optional()
   }))

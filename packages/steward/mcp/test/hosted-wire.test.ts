@@ -212,6 +212,41 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     await client.close();
   });
 
+  it( 'Given a host that acks propose when propose is called with Place Order carrying dataShape { orderId: string } then the submission carries that exact dataShape (BP-270 D13)', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+    const dataShape = { fields: [ { name: 'orderId', type: { kind: 'string' } } ] };
+
+    const body = toolBody( await client.callTool({ name: 'propose', arguments: {
+      nodes: [ { type: 'command', label: 'Place Order', subdomain: 'sales', dataShape } ]
+    } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect( submits ).toHaveLength( 1 );
+    expect( submits[ 0 ].args ).toEqual({
+      nodes: [ { type: 'command', label: 'Place Order', subdomain: 'sales', dataShape } ],
+      author: 'ai'
+    });
+
+    await client.close();
+  });
+
+  it( 'Given a host that acks modify when modify sets dataShape on Place Order then the submission carries that exact set.dataShape', async () => {
+    const host = createFakeHost({ graph: GRAPH });
+    const client = await connect( host );
+    const dataShape = { fields: [ { name: 'orderId', type: { kind: 'string' } }, { name: 'discountCode', type: { kind: 'string' }, optional: true } ] };
+
+    toolBody( await client.callTool({ name: 'modify', arguments: { entries: [ { id: PLACE, set: { dataShape } } ] } }));
+
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect( submits ).toHaveLength( 1 );
+    expect( submits[ 0 ] ).toMatchObject({ verb: 'modify' });
+    expect(( submits[ 0 ].args?.entries as { set: unknown }[] )[ 0 ].set ).toEqual({ dataShape });
+
+    await client.close();
+  });
+
   it( 'Given a host that acks propose with { verb, events } when the batch draws aggregate -[produces]-> event then the write lands and its TOPOLOGY_VIOLATION comes back as a finding (ADR-016)', async () => {
     const host = createFakeHost({ graph: GRAPH });
     const client = await connect( host );
@@ -336,6 +371,23 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     expect(( body.nodes as { id: string }[] ).map( node => node.id )).toContain( RESERVE );
     expect( body ).not.toHaveProperty( 'designError' );
     expect( host.calls.map( call => call.route )).toEqual( [ API_BLUEPRINT_DESIGN_JSON ] );
+
+    await client.close();
+  });
+
+  it( 'Given a checkout graph whose Place Order carries dataShape { orderId: string } when get_flow runs then the Place Order node view carries that exact dataShape, so the agent can send the whole new shape on a modify (BP-270 D24(a))', async () => {
+    const dataShape = { fields: [ { name: 'orderId', type: { kind: 'string' } } ] };
+    const graph = { ...GRAPH, nodes: GRAPH.nodes.map( node => node.id === PLACE ? { ...node, dataShape } : node ) };
+    mkdirSync( join( repoPath, '.blueprint' ), { recursive: true });
+    writeFileSync( join( repoPath, '.blueprint', 'graph.json' ), JSON.stringify( graph ), 'utf-8' );
+    const client = await connect( createFakeHost());
+
+    const body = toolBody( await client.callTool({ name: 'get_flow', arguments: { rootCommand: PLACE } }));
+
+    expect( body.ok ).toBe( true );
+    const nodes = body.nodes as { id: string; dataShape?: unknown }[];
+    expect( nodes.find( node => node.id === PLACE )?.dataShape ).toEqual( dataShape );
+    expect( nodes.find( node => node.id === ORDER )).not.toHaveProperty( 'dataShape' );
 
     await client.close();
   });
