@@ -20,22 +20,34 @@ export const READ_STDERR_TAIL = 2048;
 const ARGUMENT_OF = { search: 'text', resolve: 'ref' };
 
 const refused = ( detail ) => ( { ok: false, result: JSON.stringify( { status: 'refused', detail } ) } );
-const answered = ( result ) => ( { ok: true, result: JSON.stringify( result ) } );
+// BP-230 (D15): an answered result carries the declared `observability.apm` as declared when it is a string, never
+// defaulted or matched against known apms here (ADR-107); without a string one it has no apm key, and the server reads
+// that as grafana.
+const answered = ( result, apm ) => ( { ok: true, result: JSON.stringify( apm === undefined ? result : { ...result, apm } ) } );
 
-/** The `observability.read` string `dir`'s .blueprint.config.json declares, or undefined for none (or no readable file). */
-const declaredReader = ( dir ) => {
+/** `dir`'s .blueprint.config.json `observability` block, or undefined for none (or no readable file). */
+const declaredObservability = ( dir ) => {
   try {
-    const read = JSON.parse( readFileSync( join( dir, '.blueprint.config.json' ), 'utf-8' ) )?.observability?.read;
-    return typeof read === 'string' && read.trim() !== '' ? read : undefined;
+    return JSON.parse( readFileSync( join( dir, '.blueprint.config.json' ), 'utf-8' ) )?.observability;
   } catch {
     return undefined;
   }
 };
 
+/** The block's `read` string, or undefined for none. */
+const declaredReader = ( observability ) => {
+  const read = observability?.read;
+  return typeof read === 'string' && read.trim() !== '' ? read : undefined;
+};
+
+/** The block's `apm` string as declared, or undefined when it is absent or not a string. */
+const declaredApm = ( observability ) => ( typeof observability?.apm === 'string' ? observability.apm : undefined );
+
 /**
  * Runs one read in `dir` (the session's worktree, else the --repo checkout). The job is done whenever the reader was
  * asked or found undeclared, its result one of: { status: 'ok', stdout }, { status: 'too-large', bytes },
- * { status: 'unreachable', exitCode, timedOut, stderr } (stderr's last 2 kB), { status: 'not-declared' }. A payload
+ * { status: 'unreachable', exitCode, timedOut, stderr } (stderr's last 2 kB), { status: 'not-declared' }, each with the
+ * declared `observability.apm` string as `apm` when there is one. A payload
  * that is not { op: search, text } or { op: resolve, ref } of at most 512 characters fails { status: 'refused', detail }
  * and runs nothing.
  */
@@ -46,13 +58,15 @@ export const runObservabilityRead = async ( job, { dir, timeoutMs = READ_TIMEOUT
   const argument = payload[ name ];
   if ( typeof argument !== 'string' || argument === '' ) return refused( `a ${ payload.op } read needs a non-empty ${ name }` );
   if ( argument.length > READ_ARGUMENT_MAX ) return refused( `the ${ name } is ${ argument.length } characters, over ${ READ_ARGUMENT_MAX }` );
-  const command = declaredReader( dir );
-  if ( command === undefined ) return answered( { status: 'not-declared' } );
+  const observability = declaredObservability( dir );
+  const apm = declaredApm( observability );
+  const command = declaredReader( observability );
+  if ( command === undefined ) return answered( { status: 'not-declared' }, apm );
   const run = await runChild( 'sh', [ '-c', `${ command } "$@"`, 'sh', payload.op, argument ], { cwd: dir, timeoutMs } );
   if ( run.status === 0 ) {
     const bytes = Buffer.byteLength( run.stdout );
-    return answered( bytes > READ_STDOUT_MAX_BYTES ? { status: 'too-large', bytes } : { status: 'ok', stdout: run.stdout } );
+    return answered( bytes > READ_STDOUT_MAX_BYTES ? { status: 'too-large', bytes } : { status: 'ok', stdout: run.stdout }, apm );
   }
   const stderr = run.stderr || run.error?.message || '';
-  return answered( { status: 'unreachable', exitCode: run.status, timedOut: run.timedOut === true, stderr: stderr.slice( -READ_STDERR_TAIL ) } );
+  return answered( { status: 'unreachable', exitCode: run.status, timedOut: run.timedOut === true, stderr: stderr.slice( -READ_STDERR_TAIL ) }, apm );
 };
