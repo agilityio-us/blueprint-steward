@@ -140,11 +140,15 @@ export type KpiLookupRequest = { op: 'search'; text: string } | { op: 'resolve';
 /** A search entry as the read contract prints it: a panel carries a ref, a metric only its name. */
 export type KpiLookupEntry = { kind: 'panel'; ref: string; title: string } | { kind: 'metric'; name: string };
 
-/** What the observability read route answers; never "not found". */
-export type KpiLookupAnswer =
+/**
+ * What the observability read route answers; never "not found". `apm` (BP-230 D15) is the repository's declared APM
+ * as the host reports it; it comes back to the agent as the host sent it.
+ */
+export type KpiLookupAnswer = (
   | { status: 'ok'; op: 'search'; entries: KpiLookupEntry[]; count: number }
   | { status: 'ok'; op: 'resolve'; verdict: 'found' | 'missing' }
-  | { status: 'unreachable'; op: KpiLookupRequest[ 'op' ]; reason: string };
+  | { status: 'unreachable'; op: KpiLookupRequest[ 'op' ]; reason: string }
+) & { apm?: string };
 
 /** repoPath is the checkout the extracted graph is read from; target is the hosted session. */
 export type HandlerContext = {
@@ -715,7 +719,23 @@ export type KpiSourceArgs = {
   denominator?: KpiEventSideArgs;
   datasource?: string;
   expr?: string;
+  language?: string;
 };
+
+// BP-230 (D3): the language a query KPI's expr is written in, a closed set shipping promql alone; absent means promql.
+// A copy of blueprint-schema's KpiQueryLanguage, KPI_QUERY_LANGUAGES and isKpiQueryLanguage (src/map-vocabulary.ts),
+// which no published blueprint-schema carries yet (1.8.0 does not); swap these for the import once the minor that
+// carries them is published and pinned.
+export type KpiQueryLanguage = 'promql';
+
+export const KPI_QUERY_LANGUAGES: readonly KpiQueryLanguage[] = Object.freeze( [ 'promql' ] );
+
+export function isKpiQueryLanguage( value: unknown ): value is KpiQueryLanguage {
+  return typeof value === 'string' && ( KPI_QUERY_LANGUAGES as readonly string[] ).includes( value );
+}
+
+// The query variant with its language; the installed blueprint-schema's KpiSource does not name the field yet.
+type KpiQuerySource = Extract<KpiSource, { kind: 'query' }> & { language?: KpiQueryLanguage };
 
 export type KpiDefinitionArgs = {
   kind: KpiKind;
@@ -774,18 +794,28 @@ function required<Value>( value: Value | undefined, field: string, variant: stri
   return value;
 }
 
-function kpiSourceOf( source: KpiSourceArgs ): KpiSource {
+function kpiSourceOf( source: KpiSourceArgs ): KpiSource | KpiQuerySource {
   const path = 'kpi.definition.source';
   const variant = `a KPI source of kind ${ source.kind }`;
   if ( source.kind === 'query' ){
     refuseForeign({ numerator: source.numerator, denominator: source.denominator }, path, variant );
-    return {
+    const query: KpiQuerySource = {
       kind: 'query',
       datasource: required( source.datasource, `${ path }.datasource`, variant ),
       expr: required( source.expr, `${ path }.expr`, variant )
     };
+    if ( source.language === undefined ) return query;
+    // BP-230 (D5): only the vocabulary is checked; which language the repo's APM reads is the compiler's call.
+    if ( !isKpiQueryLanguage( source.language )){
+      throw new BlueprintMcpError(
+        'MAP_ENTRY_INVALID',
+        `${ variant }: ${ path }.language is one of ${ KPI_QUERY_LANGUAGES.join( ', ' ) }; got ${ JSON.stringify( source.language ) }; nothing was written`,
+        { fields: [ `${ path }.language` ], allowed: KPI_QUERY_LANGUAGES }
+      );
+    }
+    return { ...query, language: source.language };
   }
-  refuseForeign({ datasource: source.datasource, expr: source.expr }, path, variant );
+  refuseForeign({ datasource: source.datasource, expr: source.expr, language: source.language }, path, variant );
   return {
     kind: 'events',
     numerator: required( source.numerator, `${ path }.numerator`, variant ),
