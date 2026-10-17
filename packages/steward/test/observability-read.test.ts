@@ -50,9 +50,9 @@ const ECHO_READER = [
 
 const G = 'git -c user.email=t@t -c user.name=t';
 /** A git checkout holding fake-reader.mjs and a .blueprint.config.json declaring it, or declaring nothing. */
-const makeRepo = ( { reader = ECHO_READER, declared = true }: { reader?: string; declared?: boolean } = {} ) => {
+const makeRepo = ( { reader = ECHO_READER, declared = true, apm }: { reader?: string; declared?: boolean; apm?: unknown } = {} ) => {
   const dir = mkdtempSync( join( tmpdir(), 'blueprint-observability-read-repo-' ) );
-  writeFileSync( join( dir, '.blueprint.config.json' ), JSON.stringify( declared ? { observability: { read: 'node fake-reader.mjs' } } : { designTooling: {} } ) );
+  writeFileSync( join( dir, '.blueprint.config.json' ), JSON.stringify( declared ? { observability: { read: 'node fake-reader.mjs', ...( apm === undefined ? {} : { apm } ) } } : apm === undefined ? { designTooling: {} } : { observability: { apm } } ) );
   writeFileSync( join( dir, 'fake-reader.mjs' ), reader );
   writeFileSync( join( dir, '.gitignore' ), 'seen.json\n' );
   execSync( `git init -q -b main && ${ G } add -A && ${ G } commit -qm init`, { cwd: dir } );
@@ -202,5 +202,31 @@ describe( 'blueprint-steward: observability-read job', () => {
     const answer = await handle( repo, { op: 'search', text: 'checkout' }, [ '--git-timeout', '1' ] );
 
     expect( { status: answer.status, result: answer.result } ).toEqual( { status: 'done', result: { status: 'ok', stdout: 'late' } } );
+  } );
+
+  it( 'Given a repo declaring apm \'acme-apm\' and an echo reader when Steward handles {op: search, text: payment} then the result is { status: ok, stdout, apm: acme-apm }; with no apm the result has no apm key', async () => {
+    const declaredRepo = makeRepo( { apm: 'acme-apm' } );
+    const bareRepo = makeRepo();
+
+    const withApm = await handle( declaredRepo, { op: 'search', text: 'payment' } );
+    const without = await handle( bareRepo, { op: 'search', text: 'payment' } );
+
+    expect( withApm.result ).toEqual( { status: 'ok', stdout: 'arg search\narg payment\n', apm: 'acme-apm' } );
+    expect( without.result ).toEqual( { status: 'ok', stdout: 'arg search\narg payment\n' } );
+    expect( Object.hasOwn( without.result, 'apm' ) ).toBe( false );
+  } );
+
+  it( 'Given a declared apm when the answer is not-declared, too-large or unreachable then each still carries the apm; a non-string apm is dropped', async () => {
+    const noReader = await handle( makeRepo( { declared: false, apm: 'acme-apm' } ), { op: 'search', text: 'payment' } );
+    const large = await handle( makeRepo( { reader: `process.stdout.write('x'.repeat(${ 256 * 1024 + 1 }));\n`, apm: 'acme-apm' } ), { op: 'search', text: 'payment' } );
+    const down = await handle( makeRepo( { reader: 'process.exit(3);\n', apm: 'acme-apm' } ), { op: 'search', text: 'payment' } );
+    const numeric = await handle( makeRepo( { apm: 42 } ), { op: 'search', text: 'payment' } );
+    const refused = await handle( makeRepo( { apm: 'acme-apm' } ), { op: 'write', text: 'payment' } );
+
+    expect( noReader.result ).toEqual( { status: 'not-declared', apm: 'acme-apm' } );
+    expect( large.result ).toEqual( { status: 'too-large', bytes: 262_145, apm: 'acme-apm' } );
+    expect( down.result ).toEqual( { status: 'unreachable', exitCode: 3, timedOut: false, stderr: '', apm: 'acme-apm' } );
+    expect( Object.hasOwn( numeric.result, 'apm' ) ).toBe( false );
+    expect( Object.hasOwn( refused.result, 'apm' ) ).toBe( false );
   } );
 } );
