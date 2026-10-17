@@ -12,6 +12,7 @@ worktree of the clone, at `<clone>.blueprint-worktrees/<session id>`. The kinds 
 | Kind | What Steward does |
 | - | - |
 | `design` | Brings the session's worktree to the job's branch, runs the repository's declared extractor (`designTooling.extract` in `.blueprint.config.json`), pushes the graph and diagnostics, downloads the method plugin the claim names and checks its sha256, then runs `claude -p` on the instructions the server serves, with `blueprint-mcp` pointed at the hosted session |
+| `reply` | Answers a card thread on the board: runs `claude -p` as a design job does, in the session's worktree as it stands (moved to the job's branch tip only when it is elsewhere), with no extraction or push and none of `--design-tools`. Replies of one session run beside each other and beside its design job's agent, never during that job's checkout and extraction, a flush or a scaffold. Steward's claim names `reply` explicitly: a claim naming no kinds counts as running no replies, and the server then gives its design claims no agent context |
 | `flush` | Commits the session's bundle to the branch with git plumbing, fast-forward only, never forced |
 | `scaffold` | Runs the repository's declared scaffold command and commits what it wrote, always as one commit with the trailer `Blueprint-Scaffold: <KEY>`, whose `<docsRoot>/<KEY>/scaffold.json` says `done`, `blocked` or `skipped` |
 | `ticket-branch`, `pr-ready` | Creates a ticket's branch on origin (optionally with a draft pull request), or sets the pull request's body from `<docsRoot>/<KEY>/pull-request.md` when the branch commits one and takes it out of draft, through `gh` |
@@ -35,8 +36,13 @@ agent branches (`claude/<branch>`), merging an agent branch whose latest signal 
   observability reader. They run with your environment, minus Steward's own secrets. Its `docsRoot` (default
   `docs/prs`) is where each item's folder, `<docsRoot>/<KEY>/`, lives.
 - **The design agent**: `claude -p`, started with only the tools the job names (`--tools`, `--allowedTools`),
-  `--strict-mcp-config`, `--setting-sources project` and no session kept on disk. `--tool-ceiling` caps the tools any
-  job may ask for. The agent's MCP server writes with a key the server minted for that job alone, never the org key.
+  `--strict-mcp-config` and `--setting-sources project`. `--tool-ceiling` caps the tools any job may ask for. A job keeps
+  no session on disk unless its claim names an agent context: each card thread, and the design round's designer, is
+  one Claude session, started with `--session-id` and continued with `--resume`. A resume whose session file is gone
+  (`<config dir>/projects/*/<id>.jsonl`) starts the session the claim names to rebuild under, on the prompt it carries;
+  a context Steward cannot run fails the job `agent-context-invalid` before claude starts. The report says whether
+  the context was `resumed`, `rebuilt` or `fresh`, its session id and the tokens it started at. The sessions live under
+  `--agent-sessions-dir` (see below); the ones claims named that went unused for 14 days are removed at start and daily. The agent's MCP server writes with a key the server minted for that job alone, never the org key.
 
 What leaves the machine: the extracted graph and diagnostics, design operations, job reports, and the answers to jobs
 the server composes (a tracker poll's tickets, an observability read's output). Source does not.
@@ -60,6 +66,8 @@ the process's argv.
 | `BLUEPRINT_ROUTINE_<ALIAS>_URL`, `BLUEPRINT_ROUTINE_<ALIAS>_TOKEN` | for dispatch | A routine's fire endpoint and its token, per alias; the claim names the aliases, never the values |
 | `BLUEPRINT_MERGE_POLL_SECONDS` | no | The merge poll's period; `--merge-poll` overrides it |
 | `BLUEPRINT_SESSION_ID` | no | Claim, push or enqueue for one session only |
+| `BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR` | no | Where the agent's Claude sessions are kept, so a card thread's next question resumes its conversation; `--agent-sessions-dir` overrides it. Named, it is claude's `CLAUDE_CONFIG_DIR` for those jobs and needs `CLAUDE_CODE_OAUTH_TOKEN`; unset, claude's own config dir (`$CLAUDE_CONFIG_DIR`, else `~/.claude`). The image sets it to `/work/.agent-sessions`, on its `/work` volume. New in 1.4.0, so it has no `BLUEPRINT_RUNNER_*` name |
+| `BLUEPRINT_SESSION_PRUNE_SECONDS` | no | How often the sessions of the agent contexts the server issued, idle for more than 14 days, are removed (default a day); `--session-prune` overrides it |
 | `BLUEPRINT_STEWARD_CLAUDE`, `BLUEPRINT_STEWARD_GH` | no | Other `claude` or `gh` binaries |
 
 The image's entrypoint also reads `BLUEPRINT_SERVER` (the server's base URL), `BLUEPRINT_REPO_URL` (the repository

@@ -74,7 +74,8 @@ const makeRepo = ( extract = 'mkdir -p .blueprint && echo \'{"nodes":[1,2]}\' > 
 const worktreeOf = ( repo: string, sessionId: string ) => join( `${ repo }.blueprint-worktrees`, sessionId );
 const realDir = ( dir: string ) => ( existsSync( dir ) ? execSync( 'pwd -P', { cwd: dir, encoding: 'utf-8' } ).trim() : `<no directory ${ dir }>` );
 
-const makeFakeClaude = ( exitCode: number ) => {
+// `stream`: stream-json lines the fake writes after its init line (none by default).
+const makeFakeClaude = ( exitCode: number, stream = '' ) => {
   const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-claude-' ) );
   const record = join( dir, 'record.json' );
   const script = join( dir, 'claude.mjs' );
@@ -84,6 +85,7 @@ const argv = process.argv.slice(2);
 const cfg = argv[argv.indexOf('--mcp-config') + 1];
 writeFileSync(${ JSON.stringify( record ) }, JSON.stringify({ argv, cwd: process.cwd(), env: process.env, mcpRaw: readFileSync(cfg, 'utf-8'), mcp: JSON.parse(readFileSync(cfg, 'utf-8')) }));
 ${ printInit }
+process.stdout.write(${ JSON.stringify( stream ) });
 console.log('fake agent output');
 process.exit(${ exitCode });
 ` );
@@ -93,9 +95,11 @@ process.exit(${ exitCode });
 
 // The caller's routine variables are scrubbed, so a claim's kinds are the fixture's, not the shell's.
 const withoutRoutines = ( env: NodeJS.ProcessEnv ) => Object.fromEntries( Object.entries( env ).filter( ( [ name ] ) => !name.startsWith( 'BLUEPRINT_ROUTINE_' ) ) );
-const run = ( args: string[], env: Record<string, string> = {}, opts: { killWhen?: () => boolean } = {} ) =>
+// A variable given as undefined is unset in Steward's environment.
+const run = ( args: string[], env: Record<string, string | undefined> = {}, opts: { killWhen?: () => boolean } = {} ) =>
   new Promise<{ code: number | null; stdout: string; stderr: string }>( ( res ) => {
-    const child = spawn( process.execPath, [ BIN, ...args ], { env: { ...withoutRoutines( process.env ), BLUEPRINT_STEWARD_TOKEN: '', BLUEPRINT_SESSION_ID: '', BLUEPRINT_JIRA_API_TOKEN: '', ...env } } );
+    const merged = { ...withoutRoutines( process.env ), BLUEPRINT_STEWARD_TOKEN: '', BLUEPRINT_SESSION_ID: '', BLUEPRINT_JIRA_API_TOKEN: '', BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR: '', ...env };
+    const child = spawn( process.execPath, [ BIN, ...args ], { env: Object.fromEntries( Object.entries( merged ).filter( ( [ , value ] ) => value !== undefined ) ) } );
     let stdout = '', stderr = '';
     child.stdout.on( 'data', ( c ) => { stdout += c; } );
     child.stderr.on( 'data', ( c ) => { stderr += c; } );
@@ -315,9 +319,10 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   // kinds is never handed one. It commits session bundles, so it names flush; it answers observability reads, so it
   // names observability-read. With no BLUEPRINT_ROUTINE_* pair it holds no routine, so it names neither
   // implementation-dispatch nor any alias. It commits the scaffold output, so it names scaffold. It loads the method
-  // plugin the host serves with a design claim (METHOD_MIN_RUNNER_VERSION from @bett3r-dev/blueprint-spec), as
-  // version 1.3.0.
-  it( 'start --once: the claim carries the origin remoteUrl, the kinds design, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold and observability-read, and Steward\'s version 1.3.0', async () => {
+  // plugin the host serves with a design claim (METHOD_MIN_RUNNER_VERSION from @bett3r-dev/blueprint-spec). It answers
+  // card threads, so it names reply (Blueprint ADR-137), explicitly: a claim naming no kinds counts as running no
+  // replies, and its design claims get no agent context. Version 1.4.0 runs reply and design jobs in their agent context.
+  it( 'start --once: the claim carries the origin remoteUrl, the kinds design, reply, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold and observability-read, and Steward\'s version 1.4.0', async () => {
     const host = await fakeHost( () => ( { body: { job: null } } ) );
     const repo = makeRepo();
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--interval', '60', '--merge-poll', '600' ], {},
@@ -325,9 +330,9 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
     expect( claim.body ).toMatchObject( {
       remoteUrl: execSync( 'git remote get-url origin', { cwd: repo, encoding: 'utf-8' } ).trim(),
-      kinds: [ 'design', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read' ],
+      kinds: [ 'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read' ],
     } );
-    expect( claim.body.runnerVersion ).toBe( '1.3.0' );
+    expect( claim.body.runnerVersion ).toBe( '1.4.0' );
     expect( claim.body.routineAliases ).toBeUndefined();
     // The host hands design jobs only to a version at or above its method minimum: Steward must meet it.
     expect( runnerMeets( claim.body.runnerVersion, METHOD_MIN_RUNNER_VERSION ) ).toBe( true );
@@ -336,13 +341,13 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   // With the whole Jira credential in its environment Steward holds the tracker handlers, so its claim names the
   // kinds; the case above, with BLUEPRINT_JIRA_API_TOKEN scrubbed, pins that it does not without one. The same
   // credential runs tracker-transition and tracker-describe.
-  it( 'start: with BLUEPRINT_JIRA_BASE_URL, _EMAIL and _API_TOKEN set, the claim\'s kinds are design, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold, observability-read, tracker-poll, tracker-comment, tracker-transition and tracker-describe', async () => {
+  it( 'start: with BLUEPRINT_JIRA_BASE_URL, _EMAIL and _API_TOKEN set, the claim\'s kinds are design, reply, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold, observability-read, tracker-poll, tracker-comment, tracker-transition and tracker-describe', async () => {
     const host = await fakeHost( () => ( { body: { job: null } } ) );
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--interval', '60', '--merge-poll', '600' ], {
       BLUEPRINT_JIRA_BASE_URL: 'https://acme.atlassian.net', BLUEPRINT_JIRA_EMAIL: 'bot@acme.test', BLUEPRINT_JIRA_API_TOKEN: 'jira-token',
     }, { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' ) } );
     const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
-    expect( claim.body.kinds ).toEqual( [ 'design', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read', 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe' ] );
+    expect( claim.body.kinds ).toEqual( [ 'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read', 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe' ] );
   } );
 
   // A fake host that binds a session to the branch of its latest reality push. A job on a session bound to feat/x
@@ -483,6 +488,314 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     }
   } );
 
+  // Blueprint ADR-137 decision 2: a reply or design job whose claim carries an
+  // agent context runs in that Claude session, started with --session-id and resumed with --resume, kept on disk instead
+  // of dropped by --no-session-persistence. Under --agent-sessions-dir when it is given (claude's CLAUDE_CONFIG_DIR),
+  // else under the config dir claude inherits ($CLAUDE_CONFIG_DIR, else ~/.claude), whose login it keeps. A
+  // resume whose session file is gone runs the claim's rebuildSessionId on its rebuildPrompt. The report says how the
+  // context started and its size.
+  const CONTEXT_ID = '11111111-1111-4111-8111-111111111111';
+  const REBUILD_ID = '22222222-2222-4222-8222-222222222222';
+  const REBUILD_PROMPT = 'Rebuild: the thread so far is c-root "why?" and c-2 "and now?"; answer c-2.';
+  const THREAD = { threadRootId: 'c-root', channelKey: 'node:card-1', commentIds: [ 'c-root', 'c-2' ] };
+  // Provenance: captured from claude 2.1.301 resuming a session (the manual resume probe, run in an earlier build
+  // session of this work item); a later capture from claude 2.1.302 showed the same usage shape. Two turns after the init
+  // line, which the fake writes itself. Its first assistant event's usage is input 2 + cache creation 287 + cache read
+  // 6941 = 7230, the context the run started at; the result event's usage sums both turns (4 + 440 + 14169), which is no
+  // context size.
+  const STREAM_2_1_301_RESUMED = readFileSync( join( __dirname, 'fixtures', 'claude-2.1.301-stream-resumed-two-turns.jsonl' ), 'utf-8' );
+  const STARTED_TOKENS = 7230;
+  const replyHost = ( job: Record<string, unknown> ) => fakeHost( ( req ) =>
+    req.url === '/api/blueprint/steward/claim'
+      ? { body: { job: { id: 'jr', kind: 'reply', sessionId: 'sess-r', branch: 'feature', prompt: 'reply on the board by m1: and now?', jobKey: 'bpjk_minted-for-jr', instructions: SERVED, method: METHOD, ...TOOLS, payload: THREAD, ...job } } }
+      : {} );
+  const reportOf = ( host: { requests: Req[] } ) => host.requests.find( ( q ) => q.url === '/api/blueprint/steward/jobs/jr' )!.body;
+  // A claude that was never spawned recorded nothing: read as no argv and no env, so the assertions below print what is missing.
+  const recordOf = ( record: string ) => ( existsSync( record ) ? JSON.parse( readFileSync( record, 'utf-8' ) ) : { argv: [], env: {} } ) as { argv: string[]; env: Record<string, string> };
+  const sessionArgs = ( argv: string[] ) => [ valueOf( argv, '--session-id' ), valueOf( argv, '--resume' ), argv.includes( '--no-session-persistence' ) ];
+  // The three places the sessions can be, each owned by the fixture (never the real ~/.claude): a named
+  // --agent-sessions-dir, an ambient CLAUDE_CONFIG_DIR, and HOME's .claude with CLAUDE_CONFIG_DIR unset. `configDir` is
+  // where the session must be looked up, `childConfigDir` the CLAUDE_CONFIG_DIR claude must see (unset for the last).
+  const placements = () => {
+    const named = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-sessions-' ) ), 'agent-sessions' );
+    const ambient = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-config-' ) ), 'claude-config' );
+    const home = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-home-' ) );
+    const all = [ named, ambient, join( home, '.claude' ) ];
+    return [
+      { where: 'named --agent-sessions-dir', args: [ '--agent-sessions-dir', named ], env: { CLAUDE_CONFIG_DIR: ambient, HOME: home }, configDir: named, childConfigDir: named as string | undefined, named, all },
+      { where: 'ambient CLAUDE_CONFIG_DIR', args: [], env: { CLAUDE_CONFIG_DIR: ambient, HOME: home }, configDir: ambient, childConfigDir: ambient as string | undefined, named, all },
+      { where: 'ambient ~/.claude', args: [], env: { CLAUDE_CONFIG_DIR: undefined, HOME: home }, configDir: join( home, '.claude' ), childConfigDir: undefined as string | undefined, named, all },
+    ];
+  };
+  const ownedConfig = () => placements()[ 1 ].env;
+
+  it( 'Fresh start args: a reply or design job claimed with agentContext { sessionId: S, mode: fresh } spawns claude with --session-id S and no --no-session-persistence, CLAUDE_CONFIG_DIR the --agent-sessions-dir when given and the ambient one when not, and reports context fresh; a job with no agent context keeps today\'s argv', async () => {
+    // Slice 3's over-cap claim says `rebuilt` under a newly minted id, which starts the same way and is reported as such.
+    const starts = [ [ 'reply', 'fresh', CONTEXT_ID ], [ 'design', 'fresh', CONTEXT_ID ], [ 'reply', 'rebuilt', REBUILD_ID ] ];
+    for ( const [ i, [ kind, mode, id ] ] of starts.entries() ) {
+      const placement = placements()[ i ];
+      const host = await replyHost( { kind, agentContext: { sessionId: id, mode } } );
+      const claude = makeFakeClaude( 0, STREAM_2_1_301_RESUMED );
+      const repo = makeRepo();
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', ...placement.args ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...placement.env } );
+      expect( r.code ).toBe( 0 );
+      const { argv, env } = recordOf( claude.record );
+      expect( [ placement.where, kind, ...sessionArgs( argv ) ] ).toEqual( [ placement.where, kind, id, '<--resume absent>', false ] );
+      // A named dir is the child's CLAUDE_CONFIG_DIR and is created; without one the child's is the ambient one
+      // (unset stays unset) and Steward creates no sessions dir of its own.
+      expect( [ placement.where, env.CLAUDE_CONFIG_DIR, existsSync( placement.named ), existsSync( `${ repo }.blueprint-agent-sessions` ) ] )
+        .toEqual( [ placement.where, placement.childConfigDir, placement.childConfigDir === placement.named, false ] );
+      expect( reportOf( host ) ).toMatchObject( { status: 'done', context: { mode, sessionId: id, tokens: STARTED_TOKENS } } );
+    }
+    // An agent that ran and failed still reports the context it ran in; with no assistant event its size is unknown (null).
+    const failed = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    await run( [ 'start', '--server', failed.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 1 ).script, ...ownedConfig() } );
+    expect( reportOf( failed ) ).toMatchObject( { status: 'failed', reason: 'agent-error', context: { mode: 'fresh', sessionId: CONTEXT_ID, tokens: null } } );
+    // A claude that never started ran no context, so its report names none.
+    const missing = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    await run( [ 'start', '--server', missing.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: join( tmpdir(), 'no-such-claude-binary' ), ...ownedConfig() } );
+    expect( reportOf( missing ) ).toMatchObject( { status: 'failed', reason: 'claude-missing' } );
+    expect( reportOf( missing ) ).not.toHaveProperty( 'context' );
+    // Negative half: a design job whose claim carries no agent context (every claim before ADR-137) keeps
+    // --no-session-persistence, gets no session id and inherits CLAUDE_CONFIG_DIR as it was, even beside a named
+    // --agent-sessions-dir, which it does not create; its report has no context.
+    const named = placements()[ 0 ];
+    const host = await replyHost( { kind: 'design', payload: undefined } );
+    const claude = makeFakeClaude( 0, STREAM_2_1_301_RESUMED );
+    await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...named.args ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...named.env } );
+    const { argv, env } = recordOf( claude.record );
+    expect( sessionArgs( argv ) ).toEqual( [ '<--session-id absent>', '<--resume absent>', true ] );
+    expect( [ env.CLAUDE_CONFIG_DIR, existsSync( named.named ) ] ).toEqual( [ named.env.CLAUDE_CONFIG_DIR, false ] );
+    expect( reportOf( host ).status ).toBe( 'done' );
+    expect( reportOf( host ) ).not.toHaveProperty( 'context' );
+  }, 30_000 );
+
+  it( 'an --agent-sessions-dir flag with no directory after it, an empty one, or the next flag exits 1 rather than running', async () => {
+    for ( const rest of [ [ '--agent-sessions-dir' ], [ '--agent-sessions-dir', '' ], [ '--agent-sessions-dir', '--once' ] ] ) {
+      const host = await replyHost( {} );
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...rest ] );
+      expect( [ rest, r.code, host.requests.length ] ).toEqual( [ rest, 1, 0 ] );
+      expect( r.stderr ).toContain( '--agent-sessions-dir needs a directory' );
+    }
+  } );
+
+  // The image names the sessions dir in its environment (on its /work volume), so its entrypoint passes no flag; a flag
+  // given beside it wins, and an empty variable is none.
+  it( 'BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR names the sessions dir as --agent-sessions-dir does, the flag wins over it, and an empty one is none', async () => {
+    const placement = placements()[ 0 ];
+    const fromEnv = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-sessions-env-' ) ), 'agent-sessions' );
+    for ( const [ where, args, value, expected ] of [
+      [ 'env', [], fromEnv, fromEnv ],
+      [ 'flag over env', placement.args, fromEnv, placement.named ],
+      [ 'empty env', [], '', placement.env.CLAUDE_CONFIG_DIR ],
+    ] as const ) {
+      const host = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+      const claude = makeFakeClaude( 0, STREAM_2_1_301_RESUMED );
+      await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...args ],
+        { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...placement.env, BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR: value } );
+      expect( [ where, recordOf( claude.record ).env.CLAUDE_CONFIG_DIR, reportOf( host ).status ] ).toEqual( [ where, expected, 'done' ] );
+    }
+  }, 30_000 );
+
+  it( 'Reply skips extraction: a reply job runs no extract command and pushes no graph, and the agent still runs; a design job on the same repository extracts', async () => {
+    const marker = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-extract-' ) ), 'extracted' );
+    const extract = `touch ${ marker } && mkdir -p .blueprint && echo '{"nodes":[1]}' > .blueprint/graph.json`;
+    const host = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    const claude = makeFakeClaude( 0 );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo( extract ), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...ownedConfig() } );
+    expect( r.code ).toBe( 0 );
+    expect( [ existsSync( marker ), host.requests.some( ( q ) => q.url === '/api/blueprint/reality' ), existsSync( claude.record ) ] ).toEqual( [ false, false, true ] );
+    expect( reportOf( host ).status ).toBe( 'done' );
+    // Positive control: the marker is written by the extract command, which a design job runs.
+    const design = await replyHost( { kind: 'design', agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    await run( [ 'start', '--server', design.url, '--token', 'tok', '--repo', makeRepo( extract ), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script, ...ownedConfig() } );
+    expect( [ existsSync( marker ), design.requests.some( ( q ) => q.url === '/api/blueprint/reality' ) ] ).toEqual( [ true, true ] );
+  } );
+
+  // A resume claim as the server sends it: the context's session id, and the id and prompt to rebuild under.
+  const RESUME = { agentContext: { sessionId: CONTEXT_ID, mode: 'resume', rebuildSessionId: REBUILD_ID, rebuildPrompt: REBUILD_PROMPT } };
+  // Where claude 2.1.301 keeps a session under its config dir (seen in the manual probe): projects/<the cwd it started
+  // in, with / and . as ->/<session id>.jsonl, and a --resume from another directory appends to that same file.
+  const writeSession = ( configDir: string, id: string ) => {
+    mkdirSync( join( configDir, 'projects', '-private-tmp-a-worktree' ), { recursive: true } );
+    writeFileSync( join( configDir, 'projects', '-private-tmp-a-worktree', `${ id }.jsonl` ), '{}\n' );
+  };
+
+  it( 'Follow-up: given a thread\'s session exists on Steward, when a member asks a follow-up, then Steward resumes that session and reports resumed (under a named --agent-sessions-dir, the ambient CLAUDE_CONFIG_DIR, or ~/.claude)', async () => {
+    // Each placement gets dirs of its own, so no earlier run's session file is on disk.
+    for ( const placement of [ 0, 1, 2 ].map( ( i ) => placements()[ i ] ) ) {
+      // The session is only where this Steward must look.
+      writeSession( placement.configDir, CONTEXT_ID );
+      const host = await replyHost( RESUME );
+      const claude = makeFakeClaude( 0, STREAM_2_1_301_RESUMED );
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...placement.args ],
+        { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...placement.env } );
+      expect( r.code ).toBe( 0 );
+      const { argv, env } = recordOf( claude.record );
+      expect( [ placement.where, ...sessionArgs( argv ), env.CLAUDE_CONFIG_DIR ] ).toEqual( [ placement.where, '<--session-id absent>', CONTEXT_ID, false, placement.childConfigDir ] );
+      expect( valueOf( argv, '-p' ) ).not.toContain( REBUILD_PROMPT );
+      expect( reportOf( host ) ).toMatchObject( { status: 'done', context: { mode: 'resumed', sessionId: CONTEXT_ID, tokens: STARTED_TOKENS } } );
+    }
+  }, 30_000 );
+
+  it( 'Lost session: given the thread\'s session file is gone, when a member asks in the thread, then Steward rebuilds from the thread under a newly minted id and reports rebuilt (whichever config dir it reads)', async () => {
+    // Each placement gets dirs of its own, so no earlier run's session file is on disk.
+    for ( const placement of [ 0, 1, 2 ].map( ( i ) => placements()[ i ] ) ) {
+      const repo = makeRepo();
+      // Another context's session is where this Steward looks; this thread's is only where it must not look (the other
+      // two places, and a <repo>.blueprint-agent-sessions, which Blueprint ruled out).
+      writeSession( placement.configDir, '33333333-3333-4333-8333-333333333333' );
+      for ( const dir of [ ...placement.all.filter( ( d ) => d !== placement.configDir ), `${ repo }.blueprint-agent-sessions` ] ) writeSession( dir, CONTEXT_ID );
+      const host = await replyHost( RESUME );
+      const claude = makeFakeClaude( 0, STREAM_2_1_301_RESUMED );
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', ...placement.args ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...placement.env } );
+      expect( r.code ).toBe( 0 );
+      const { argv, env } = recordOf( claude.record );
+      expect( [ placement.where, ...sessionArgs( argv ), env.CLAUDE_CONFIG_DIR ] ).toEqual( [ placement.where, REBUILD_ID, '<--resume absent>', false, placement.childConfigDir ] );
+      // The served instructions, then the rebuild prompt in place of the job's own (the clipped words it folded).
+      expect( valueOf( argv, '-p' ) ).toBe( `${ SERVED.text }\n\n${ REBUILD_PROMPT }` );
+      expect( reportOf( host ) ).toMatchObject( { status: 'done', context: { mode: 'rebuilt', sessionId: REBUILD_ID, tokens: STARTED_TOKENS } } );
+    }
+  }, 30_000 );
+
+  it( 'a resume whose session file is gone and whose claim names nothing to rebuild under (no id, an id that is no UUID, or a blank prompt), an agent context whose session id is no UUID, or one of an unknown mode, is reported failed agent-context-invalid and claude is never spawned', async () => {
+    for ( const agentContext of [
+      { sessionId: CONTEXT_ID, mode: 'resume' },
+      { sessionId: CONTEXT_ID, mode: 'resume', rebuildSessionId: '../other', rebuildPrompt: REBUILD_PROMPT },
+      { sessionId: CONTEXT_ID, mode: 'resume', rebuildSessionId: REBUILD_ID, rebuildPrompt: '  ' },
+      { sessionId: '../../etc/passwd', mode: 'fresh' },
+      { sessionId: CONTEXT_ID, mode: 'resumed' },
+    ] ) {
+      const host = await replyHost( { agentContext } );
+      const claude = makeFakeClaude( 0 );
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...ownedConfig() } );
+      expect( r.code ).toBe( 0 );
+      expect( [ agentContext, reportOf( host ).status, reportOf( host ).reason, existsSync( claude.record ) ] ).toEqual( [ agentContext, 'failed', 'agent-context-invalid', false ] );
+      expect( reportOf( host ).result ).toContain( 'agent context' );
+    }
+  } );
+
+  // Blueprint ADR-137: Steward prunes the session files of the agent contexts the server issued it (the
+  // ids its claims named), idle for more than 14 days, at start and daily, in the config dir it looks sessions up in.
+  // A session file no claim named is never pruned, whatever its age.
+  const DAY_S = 24 * 60 * 60;
+  const RECENT_ID = '44444444-4444-4444-8444-444444444444';
+  const FOREIGN_ID = '55555555-5555-4555-8555-555555555555';
+  const sessionFile = ( configDir: string, id: string ) => join( configDir, 'projects', '-private-tmp-a-worktree', `${ id }.jsonl` );
+  const idleFor = ( file: string, days: number ) => {
+    const then = Date.now() / 1000 - days * DAY_S;
+    utimesSync( file, then, then );
+  };
+
+  it( 'Prune: given a session file was last used 15 days ago, when Steward\'s prune runs, then the file is removed and the next run in that thread rebuilds; one used 13 days ago, and an old one no claim named, remain (under a named --agent-sessions-dir, the ambient CLAUDE_CONFIG_DIR, or ~/.claude)', async () => {
+    for ( const placement of [ 0, 1, 2 ].map( ( i ) => placements()[ i ] ) ) {
+      // GIVEN: two threads' contexts were issued to this Steward (each claim started one), and claude kept their sessions.
+      const repo = makeRepo();
+      for ( const id of [ CONTEXT_ID, RECENT_ID ] ) {
+        const issued = await replyHost( { agentContext: { sessionId: id, mode: 'fresh' } } );
+        await run( [ 'start', '--server', issued.url, '--token', 'tok', '--repo', repo, '--once', ...placement.args ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script, ...placement.env } );
+        expect( [ placement.where, reportOf( issued ).status ] ).toEqual( [ placement.where, 'done' ] );
+      }
+      for ( const id of [ CONTEXT_ID, RECENT_ID, FOREIGN_ID ] ) writeSession( placement.configDir, id );
+      idleFor( sessionFile( placement.configDir, CONTEXT_ID ), 15 );
+      idleFor( sessionFile( placement.configDir, RECENT_ID ), 13 );
+      // A session of the team's own, as old, that no claim named.
+      idleFor( sessionFile( placement.configDir, FOREIGN_ID ), 15 );
+
+      // WHEN: Steward starts (its prune runs before its first claim), and the thread asks again.
+      const host = await replyHost( RESUME );
+      const claude = makeFakeClaude( 0, STREAM_2_1_301_RESUMED );
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', ...placement.args ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...placement.env } );
+
+      // THEN
+      expect( r.code ).toBe( 0 );
+      expect( [ placement.where, ...[ CONTEXT_ID, RECENT_ID, FOREIGN_ID ].map( ( id ) => existsSync( sessionFile( placement.configDir, id ) ) ) ] )
+        .toEqual( [ placement.where, false, true, true ] );
+      expect( [ placement.where, ...sessionArgs( recordOf( claude.record ).argv ) ] ).toEqual( [ placement.where, REBUILD_ID, '<--resume absent>', false ] );
+      expect( reportOf( host ) ).toMatchObject( { status: 'done', context: { mode: 'rebuilt', sessionId: REBUILD_ID } } );
+      // The 13-day-old session is still there to resume.
+      const recent = await replyHost( { agentContext: { ...RESUME.agentContext, sessionId: RECENT_ID } } );
+      await run( [ 'start', '--server', recent.url, '--token', 'tok', '--repo', repo, '--once', ...placement.args ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script, ...placement.env } );
+      expect( [ placement.where, reportOf( recent ).context ] ).toEqual( [ placement.where, { mode: 'resumed', sessionId: RECENT_ID, tokens: null } ] );
+    }
+  }, 60_000 );
+
+  // The long-lived Steward's only bound on the sessions dir is the prune after start, every --session-prune seconds
+  // (BLUEPRINT_SESSION_PRUNE_SECONDS; a day by default); it runs in the same process, with no restart.
+  it( 'Daily prune: a running Steward removes an issued session file that goes idle past 14 days after its start prune, on its next --session-prune tick (or BLUEPRINT_SESSION_PRUNE_SECONDS), without a restart', async () => {
+    for ( const cadence of [ { args: [ '--session-prune', '0.2' ], env: { BLUEPRINT_SESSION_PRUNE_SECONDS: undefined } }, { args: [], env: { BLUEPRINT_SESSION_PRUNE_SECONDS: '0.2' } } ] ) {
+      const via = cadence.args.length > 0 ? 'flag' : 'env';
+      // GIVEN: a context issued to this Steward, whose session file is fresh when Steward starts.
+      const repo = makeRepo();
+      const issued = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+      await run( [ 'start', '--server', issued.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script, ...ownedConfig() } );
+      const env = { ...ownedConfig(), ...cadence.env };
+      writeSession( env.CLAUDE_CONFIG_DIR!, CONTEXT_ID );
+      const file = sessionFile( env.CLAUDE_CONFIG_DIR!, CONTEXT_ID );
+      // WHEN: Steward has claimed once (its start prune ran before that claim), the file goes idle past 14 days.
+      const host = await fakeHost( ( req ) => ( req.url.startsWith( '/api/blueprint/branches?' ) ? { body: { branches: [] } } : { body: { job: null } } ) );
+      const claimed = () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' );
+      let afterStart: boolean | undefined;
+      let deadline = Infinity;
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--interval', '600', '--merge-poll', '600', ...cadence.args ], env, {
+        killWhen: () => {
+          if ( afterStart === undefined && claimed() ) {
+            afterStart = existsSync( file );
+            idleFor( file, 15 );
+            // Ample for a 0.2 s tick on a loaded machine; past it the assertion below prints the file still there.
+            deadline = Date.now() + 30_000;
+          }
+          return afterStart !== undefined && ( !existsSync( file ) || Date.now() > deadline );
+        },
+      } );
+      // THEN: the start prune left the fresh file, and a later tick of the same process removed it once idle.
+      expect( [ via, afterStart, existsSync( file ), r.code ] ).toEqual( [ via, true, false, null ] );
+    }
+  }, 90_000 );
+
+  it( 'a --session-prune or BLUEPRINT_SESSION_PRUNE_SECONDS that is no positive number, or past the longest timer, exits 1 before any request', async () => {
+    for ( const [ args, value ] of [ [ [ '--session-prune', '0' ], undefined ], [ [ '--session-prune', 'daily' ], undefined ], [ [ '--session-prune', '2147484' ], undefined ], [ [], '-1' ] ] as const ) {
+      const host = await replyHost( {} );
+      const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...args ], { ...ownedConfig(), BLUEPRINT_SESSION_PRUNE_SECONDS: value } );
+      expect( [ args, value, r.code, host.requests.length ] ).toEqual( [ args, value, 1, 0 ] );
+      expect( r.stderr ).toContain( 'needs a positive number of at most 2147483' );
+    }
+  } );
+
+  // A prune that fails (here the sessions dir's projects is a regular file, so it cannot be listed) is logged, and
+  // Steward still claims and reports its job.
+  it( 'a prune that fails is logged as agent session prune: and Steward still claims and reports its job', async () => {
+    const repo = makeRepo();
+    const env = ownedConfig();
+    const issued = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    await run( [ 'start', '--server', issued.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script, ...env } );
+    // The ledger is not empty, so the prune reads the projects dir.
+    expect( JSON.parse( readFileSync( join( `${ repo }.blueprint-worktrees`, '.agent-contexts.json' ), 'utf-8' ) ) ).toEqual( [ CONTEXT_ID ] );
+    mkdirSync( env.CLAUDE_CONFIG_DIR!, { recursive: true } );
+    writeFileSync( join( env.CLAUDE_CONFIG_DIR!, 'projects' ), 'not a directory\n' );
+    const host = await replyHost( { agentContext: { sessionId: RECENT_ID, mode: 'fresh' } } );
+    const claude = makeFakeClaude( 0 );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script, ...env } );
+    expect( [ r.code, r.stderr.match( /blueprint-steward: agent session prune: \S+/ )?.[ 0 ], host.requests.find( ( q ) => q.url === '/api/blueprint/steward/jobs/jr' )?.body.status, existsSync( claude.record ) ] )
+      .toEqual( [ 0, 'blueprint-steward: agent session prune: ENOTDIR:', 'done', true ] );
+  } );
+
+  // A reply shares the session's worktree read-only, so the team's --design-tools grant (which may write) is a
+  // design job's alone.
+  it( 'a reply job runs on its served tools alone: the team\'s --design-tools grant never reaches it, while a design job beside it gets it', async () => {
+    const granted = [ '--design-tools', 'Bash Write Edit' ];
+    const replied = await replyHost( { agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    const replyClaude = makeFakeClaude( 0 );
+    await run( [ 'start', '--server', replied.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...granted ], { BLUEPRINT_STEWARD_CLAUDE: replyClaude.script, ...ownedConfig() } );
+    const { argv } = recordOf( replyClaude.record );
+    expect( [ valueOf( argv, '--allowedTools' ), valueOf( argv, '--tools' ), reportOf( replied ).status ] ).toEqual( [ TOOLS.tools.join( ' ' ), 'Read,Glob,Grep', 'done' ] );
+    // Positive control: the same grant reaches a design job.
+    const designed = await replyHost( { kind: 'design', agentContext: { sessionId: CONTEXT_ID, mode: 'fresh' } } );
+    const designClaude = makeFakeClaude( 0 );
+    await run( [ 'start', '--server', designed.url, '--token', 'tok', '--repo', makeRepo(), '--once', ...granted ], { BLUEPRINT_STEWARD_CLAUDE: designClaude.script, ...ownedConfig() } );
+    expect( valueOf( recordOf( designClaude.record ).argv, '--tools' ) ).toBe( 'Read,Glob,Grep,Bash,Write,Edit' );
+  }, 30_000 );
+
   it( 'start --once: with no --tool-ceiling Steward is permissive and a job asking for Bash spawns claude with it', async () => {
     const host = await toolsHost( { tools: [ 'mcp__blueprint', 'Read', 'Bash' ] } );
     const claude = makeFakeClaude( 0 );
@@ -514,6 +827,29 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     expect( within.requests.at( -1 )!.body.status ).toBe( 'done' );
     expect( existsSync( allowed.record ) ).toBe( true );
   } );
+
+  // A ceiling entry naming an MCP server (mcp__<server>, no further __) admits that server's tools
+  // (mcp__<server>__*), as reply jobs ask for them by name; every other entry still matches exactly.
+  it( 'start --once: a --tool-ceiling naming the MCP server mcp__blueprint admits a job asking for mcp__blueprint__* tools, and nothing else widens', async () => {
+    const CEILING = 'mcp__blueprint Read Glob Grep';
+    const within = await toolsHost( { tools: [ 'mcp__blueprint__get_design', 'mcp__blueprint__comment', 'Read' ] } );
+    const allowed = makeFakeClaude( 0 );
+    await run( [ 'start', '--server', within.url, '--token', 'tok', '--repo', makeRepo(), '--once', '--tool-ceiling', CEILING ], { BLUEPRINT_STEWARD_CLAUDE: allowed.script } );
+    expect( [ within.requests.at( -1 )!.body.status, within.requests.at( -1 )!.body.reason, existsSync( allowed.record ) ] ).toEqual( [ 'done', undefined, true ] );
+    // Still refused: a tool outside the ceiling; another server whose name only begins with the entry's; a full tool
+    // entry is no prefix; a built-in entry admits no scoped rule of it.
+    for ( const [ ceiling, beyond ] of [
+      [ CEILING, 'Bash' ], [ CEILING, 'mcp__blueprint_repo__log' ], [ CEILING, 'mcp__blueprintx' ],
+      [ 'mcp__blueprint__get mcp__blueprint__get_design', 'mcp__blueprint__get__x' ], [ CEILING, 'Read(./src/**)' ],
+    ] ) {
+      const host = await toolsHost( { tools: [ 'mcp__blueprint__get_design', beyond ] } );
+      const claude = makeFakeClaude( 0 );
+      await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', '--tool-ceiling', ceiling ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
+      const report = host.requests.at( -1 )!.body;
+      expect( [ beyond, report.status, report.reason, report.result.includes( `asks for ${ beyond },` ), existsSync( claude.record ) ] )
+        .toEqual( [ beyond, 'failed', 'tools-beyond-ceiling', true, false ] );
+    }
+  }, 30_000 );
 
   it( 'a --tool-ceiling flag with no list after it exits 1 rather than running without a ceiling', async () => {
     const host = await toolsHost( { tools: [ 'Bash' ] } );
@@ -1336,6 +1672,16 @@ console.log('fake agent output');
     expect( [ within.r.code, within.builtIn, within.report ] ).toEqual( [ 0, 'Read,Glob,Grep,Bash', [ 'done' ] ] );
   }, 40_000 );
 
+  // The startup check holds the grant to the ceiling as a job's tools are (withinCeiling): an MCP server entry
+  // admits that server's tools, and no other server's.
+  it( 'a grant of an MCP server\'s tool under a --tool-ceiling naming that server runs; one of another server exits 1', async () => {
+    const within = await runWith( [ '--tool-ceiling', 'mcp__blueprint Read Glob Grep', '--design-tools', 'mcp__blueprint__get_design' ] );
+    expect( [ within.r.code, within.report, within.allowed.split( ' ' ).includes( 'mcp__blueprint__get_design' ) ] ).toEqual( [ 0, [ 'done' ], true ] );
+    const other = await runWith( [ '--tool-ceiling', 'mcp__blueprint Read Glob Grep', '--design-tools', 'mcp__blueprint_repo__git_log' ] );
+    expect( [ other.r.code, other.requests ] ).toEqual( [ 1, 0 ] );
+    expect( other.r.stderr ).toContain( '--design-tools grants mcp__blueprint_repo__git_log, beyond this Steward\'s --tool-ceiling' );
+  }, 40_000 );
+
   it( '--design-writes forbid exits 1 on a granted tool that writes, scoped or bare, and runs a grant that does not', async () => {
     for ( const tool of [ 'Bash', 'Bash(git *)', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit' ] ) {
       const refused = await runWith( [ '--design-writes', 'forbid', '--design-tools', `Skill ${ tool }` ] );
@@ -1744,6 +2090,170 @@ tick();
     expect( await runJob( 'j4' ) ).toEqual( [ 'done' ] );
     expect( callsSoFar() ).toEqual( [ `${ wt } install --frozen-lockfile --ignore-scripts`, `${ wt } install --frozen-lockfile --ignore-scripts` ] );
   } );
+
+  // Blueprint ADR-137: a session's worktree lock. A design round's checkout and extraction hold it exclusively;
+  // reply jobs, and the round's agent once its extraction is pushed, hold it shared; a flush holds it exclusively.
+  // All of it within --concurrency.
+  const reply = ( id: string, sessionId: string, branch: string | null ) => ( { ...design( id, sessionId, branch ), kind: 'reply' } );
+  type JobRecord = { job: string; cwd: string; head: string; start: number; end: number; sawOther: boolean };
+  // A fake claude that records, per job (read off its job key), where it ran, when, and whether it saw the job it
+  // waits for running. Each job's `hold`: it runs until the `release` file exists, or until `meet` (another job id) has
+  // been seen running, or for `waitMs` at most. A job with no entry ends at once.
+  const makeJobClaude = ( hold: Record<string, { release?: string; meet?: string; waitMs: number }> ) => {
+    const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-claude-' ) );
+    const records = join( dir, 'records' );
+    const running = join( dir, 'running' );
+    mkdirSync( records );
+    mkdirSync( running );
+    const script = join( dir, 'claude.mjs' );
+    writeFileSync( script, `#!/usr/bin/env node
+import { execSync } from 'node:child_process';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const argv = process.argv.slice(2);
+const env = JSON.parse(readFileSync(argv[argv.indexOf('--mcp-config') + 1], 'utf-8')).mcpServers.blueprint.env;
+const job = env.BLUEPRINT_ACCESS_TOKEN.replace('bpjk_minted-for-', '');
+${ printInit }
+const hold = ${ JSON.stringify( hold ) }[job] ?? { waitMs: 0 };
+const start = Date.now();
+writeFileSync(join(${ JSON.stringify( running ) }, job), '');
+let sawOther = false;
+const done = () => {
+  rmSync(join(${ JSON.stringify( running ) }, job), { force: true });
+  writeFileSync(join(${ JSON.stringify( records ) }, job + '.json'), JSON.stringify({
+    job, cwd: process.cwd(), head: execSync('git rev-parse HEAD', { encoding: 'utf-8' }).trim(), start, end: Date.now(), sawOther }));
+  console.log('agent ' + job + ' done');
+  process.exit(0);
+};
+const tick = () => {
+  if (hold.meet && existsSync(join(${ JSON.stringify( running ) }, hold.meet))) sawOther = true;
+  if (sawOther || (hold.release && existsSync(hold.release)) || Date.now() - start >= hold.waitMs) { setTimeout(done, sawOther ? 300 : 0); return; }
+  setTimeout(tick, 25);
+};
+tick();
+` );
+    chmodSync( script, 0o755 );
+    const read = ( job: string ): JobRecord | undefined => ( existsSync( join( records, `${ job }.json` ) ) ? JSON.parse( readFileSync( join( records, `${ job }.json` ), 'utf-8' ) ) : undefined );
+    return { script, read, runningMark: ( job: string ) => join( running, job ) };
+  };
+
+  it( 'Parallel: given a design round is past its extraction, when two reply jobs are claimed for the session, then both agents run while the round runs', async () => {
+    // GIVEN: the round's agent runs until released; both replies are handed out only once it runs.
+    const repo = makeRepo();
+    const release = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-release-' ) ), 'go' );
+    const claude = makeJobClaude( { jd: { release, waitMs: 20_000 }, jr1: { meet: 'jr2', waitMs: 6000 }, jr2: { meet: 'jr1', waitMs: 6000 } } );
+    const host = await queueHost( [
+      design( 'jd', 'sess-a', 'feature' ),
+      { ...reply( 'jr1', 'sess-a', 'feature' ), waitFor: claude.runningMark( 'jd' ) },
+      { ...reply( 'jr2', 'sess-a', 'feature' ), waitFor: claude.runningMark( 'jd' ) },
+      // gate: a drop-worktree claimed while the replies hold the session leaves the worktree.
+      { ...drop( 'jx', 'sess-a' ), waitFor: claude.runningMark( 'jr1' ) },
+    ] );
+
+    // WHEN: the round's agent is released once both replies were reported (or at its own 20 s bound).
+    const stop = deadline( 40_000 );
+    await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--concurrency', '4', '--interval', '0.05', '--merge-poll', '600' ],
+      { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: () => {
+        if ( [ 'jr1', 'jr2' ].every( ( id ) => host.reported.some( ( r ) => r.id === id ) ) && !existsSync( release ) ) writeFileSync( release, '' );
+        return host.reported.length >= 4 || stop();
+      } } );
+
+    // THEN
+    const [ jd, jr1, jr2 ] = [ claude.read( 'jd' )!, claude.read( 'jr1' )!, claude.read( 'jr2' )! ];
+    expect( host.reported.map( ( r ) => [ r.id, r.body.status ] ).sort() ).toEqual( [ [ 'jd', 'done' ], [ 'jr1', 'done' ], [ 'jr2', 'done' ], [ 'jx', 'done' ] ] );
+    // The two replies ran at once: each saw the other running, and each started before the other ended.
+    expect( [ jr1.sawOther, jr2.sawOther, jr1.start < jr2.end, jr2.start < jr1.end ] ).toEqual( [ true, true, true, true ] );
+    // Both ran while the round's agent ran, in the session's one worktree, and were reported before it.
+    expect( [ jd.start < jr1.start, jd.start < jr2.start, jr1.end < jd.end, jr2.end < jd.end ] ).toEqual( [ true, true, true, true ] );
+    expect( [ jd.cwd, jr1.cwd, jr2.cwd ].map( realDir ) ).toEqual( Array( 3 ).fill( realDir( worktreeOf( repo, 'sess-a' ) ) ) );
+    expect( host.reported.at( -1 )!.id ).toBe( 'jd' );
+    const dropped = host.reported.find( ( r ) => r.id === 'jx' )!;
+    expect( [ dropped.body.result.includes( 'in use' ), existsSync( worktreeOf( repo, 'sess-a' ) ) ] ).toEqual( [ true, true ] );
+  }, 60_000 );
+
+  it( 'Extraction: given a design round is checking out and extracting, when a reply job is claimed, then the reply waits until the extraction ends', async () => {
+    // GIVEN: the round's extraction marks that it began, then blocks on a gate file, then stamps when it ended.
+    const marks = mkdtempSync( join( tmpdir(), 'blueprint-steward-test-extract-' ) );
+    const [ began, gate, ended ] = [ 'began', 'gate', 'ended' ].map( ( name ) => join( marks, name ) );
+    const extract = `touch ${ began } && while [ ! -f ${ gate } ]; do sleep 0.05; done && "${ process.execPath }" -e "require('fs').writeFileSync('${ ended }', String(Date.now()))"`
+      + ' && mkdir -p .blueprint && echo \'{"nodes":[1]}\' > .blueprint/graph.json';
+    const repo = makeRepo( extract );
+    const claude = makeJobClaude( {} );
+    const host = await queueHost( [ design( 'jd', 'sess-a', 'feature' ), { ...reply( 'jr', 'sess-a', 'feature' ), waitFor: began } ] );
+
+    // WHEN: the gate opens once the reply's agent started (a reply that did not wait), or 3 s after it was claimed.
+    const stop = deadline( 40_000 );
+    await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--concurrency', '2', '--interval', '0.05', '--merge-poll', '600' ],
+      { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: () => {
+        const claimed = host.claimed.find( ( c ) => c.id === 'jr' );
+        if ( claimed && !existsSync( gate ) && ( claude.read( 'jr' ) !== undefined || Date.now() - claimed.at > 3000 ) ) writeFileSync( gate, '' );
+        return host.reported.length >= 2 || stop();
+      } } );
+
+    // THEN
+    expect( host.reported.map( ( r ) => [ r.id, r.body.status ] ).sort() ).toEqual( [ [ 'jd', 'done' ], [ 'jr', 'done' ] ] );
+    const extractionEnd = Number( readFileSync( ended, 'utf-8' ) );
+    const jr = claude.read( 'jr' )!;
+    // The reply was claimed while the round extracted, and its agent started only after the extraction ended.
+    expect( [ host.claimed.find( ( c ) => c.id === 'jr' )!.at < extractionEnd, jr.start >= extractionEnd ] ).toEqual( [ true, true ] );
+  }, 60_000 );
+
+  it( 'a reply claimed while a design round waits for the worktree behind another reply waits its turn: it never starts beside the first reply', async () => {
+    // GIVEN: reply 1 runs until released; the round is claimed while it runs (and waits to check out), then reply 2.
+    const repo = makeRepo();
+    const release = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-release-' ) ), 'go' );
+    const claude = makeJobClaude( { jr1: { release, waitMs: 20_000 } } );
+    const host = await queueHost( [
+      reply( 'jr1', 'sess-a', 'feature' ),
+      { ...design( 'jd', 'sess-a', 'feature' ), waitFor: claude.runningMark( 'jr1' ) },
+      { ...reply( 'jr2', 'sess-a', 'feature' ), waitFor: claude.runningMark( 'jr1' ) },
+    ] );
+    // WHEN: reply 1 is released once reply 2's agent started (a reply that jumped the round), or 3 s after it was claimed.
+    const stop = deadline( 40_000 );
+    await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--concurrency', '3', '--interval', '0.05', '--merge-poll', '600' ],
+      { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: () => {
+        const claimed = host.claimed.find( ( c ) => c.id === 'jr2' );
+        if ( claimed && !existsSync( release ) && ( claude.read( 'jr2' ) !== undefined || existsSync( claude.runningMark( 'jr2' ) ) || Date.now() - claimed.at > 3000 ) ) writeFileSync( release, '' );
+        return host.reported.length >= 3 || stop();
+      } } );
+    // THEN
+    const [ jr1, jd, jr2 ] = [ claude.read( 'jr1' )!, claude.read( 'jd' )!, claude.read( 'jr2' )! ];
+    expect( host.reported.map( ( r ) => [ r.id, r.body.status ] ).sort() ).toEqual( [ [ 'jd', 'done' ], [ 'jr1', 'done' ], [ 'jr2', 'done' ] ] );
+    expect( [ host.claimed.map( ( c ) => c.id ), host.claimed.every( ( c ) => c.at < jr1.end ), jd.start >= jr1.end, jr2.start >= jr1.end ] )
+      .toEqual( [ [ 'jr1', 'jd', 'jr2' ], true, true, true ] );
+  }, 60_000 );
+
+  it( 'a reply whose session worktree is at another branch\'s tip waits for the worktree exclusively and moves it to its own branch', async () => {
+    const repo = makeRepo();
+    const claude = makeJobClaude( {} );
+    const host = await queueHost( [ design( 'jd', 'sess-a', 'main' ), { ...reply( 'jr', 'sess-a', 'feature' ), waitFor: join( worktreeOf( repo, 'sess-a' ), '.blueprint', 'graph.json' ) } ] );
+    const stop = deadline( 30_000 );
+    await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--concurrency', '1', '--interval', '0.05', '--merge-poll', '600' ],
+      { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: () => host.reported.length >= 2 || stop() } );
+    expect( host.reported.map( ( r ) => [ r.id, r.body.status ] ) ).toEqual( [ [ 'jd', 'done' ], [ 'jr', 'done' ] ] );
+    expect( [ claude.read( 'jd' )!.head, claude.read( 'jr' )!.head ] ).toEqual( [ sh( 'git rev-parse origin/main', repo ), sh( 'git rev-parse feature', repo ) ] );
+  }, 40_000 );
+
+  it( 'gate: a flush or a scaffold claimed while a reply of its session runs waits for the reply to end (each holds the worktree exclusively)', async () => {
+    for ( const kind of [ 'flush', 'scaffold' ] ) {
+      const repo = makeRepo();
+      const release = join( mkdtempSync( join( tmpdir(), 'blueprint-steward-test-release-' ) ), 'go' );
+      const claude = makeJobClaude( { jr: { release, waitMs: 20_000 } } );
+      const exclusive = { id: 'jx', kind, sessionId: 'sess-a', branch: 'feature', prompt: null, payload: {}, waitFor: claude.runningMark( 'jr' ) };
+      const host = await queueHost( [ reply( 'jr', 'sess-a', 'feature' ), exclusive ] );
+      // The reply is released once the job was reported (one that did not wait), or 3 s after it was claimed.
+      const stop = deadline( 40_000 );
+      await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--concurrency', '2', '--interval', '0.05', '--merge-poll', '600' ],
+        { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: () => {
+          const claimed = host.claimed.find( ( c ) => c.id === 'jx' );
+          if ( claimed && !existsSync( release ) && ( host.reported.some( ( r ) => r.id === 'jx' ) || Date.now() - claimed.at > 3000 ) ) writeFileSync( release, '' );
+          return host.reported.length >= 2 || stop();
+        } } );
+      const jr = claude.read( 'jr' )!;
+      const reported = host.reported.find( ( r ) => r.id === 'jx' )!;
+      expect( [ kind, host.reported.map( ( r ) => r.id ), host.claimed.find( ( c ) => c.id === 'jx' )!.at < jr.end, reported.at >= jr.end ] ).toEqual( [ kind, [ 'jr', 'jx' ], true, true ] );
+    }
+  }, 90_000 );
 
   it( 'a --concurrency that is not a positive whole number exits 1', async () => {
     for ( const value of [ '0', '-1', '1.5', 'abc' ] ) {
