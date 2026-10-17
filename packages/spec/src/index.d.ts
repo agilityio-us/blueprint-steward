@@ -92,7 +92,7 @@ export declare const RUNNER_JOB_NOT_CLAIMED: 'RUNNER_JOB_NOT_CLAIMED';
 // --- Jobs ---
 
 export declare const RUNNER_JOB_KINDS: readonly [
-  'design', 'git-poll', 'drop-worktree', 'flush', 'tracker-poll', 'tracker-comment', 'ticket-branch', 'observability-read',
+  'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'tracker-poll', 'tracker-comment', 'ticket-branch', 'observability-read',
   'implementation-dispatch', 'tracker-transition', 'tracker-describe', 'scaffold', 'pr-ready'
 ];
 export type RunnerJobKind = typeof RUNNER_JOB_KINDS[ number ];

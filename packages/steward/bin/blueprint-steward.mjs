@@ -627,8 +627,8 @@ const methodLoadedBy = ( line, names ) => {
     && names.every( ( name ) => event.plugins.some( ( plugin ) => plugin?.name === name ) );
 };
 
-// Blueprint ADR-137 decision 1: a card thread's answer. Its kind is not in @bett3r-dev/blueprint-spec's RUNNER_JOB_KINDS
-// yet, which the server's claim route admits beside them. A claim names it explicitly (its kinds are JOB_HANDLERS'):
+// Blueprint ADR-137 decision 1: a card thread's answer. Its kind joins @bett3r-dev/blueprint-spec's RUNNER_JOB_KINDS in
+// 1.2.0; it is added here too, deduped, while an installed spec predates it. A claim names it explicitly (its kinds are JOB_HANDLERS'):
 // a claim naming no kinds counts as not running replies, and the server then gives its design claims no agent context.
 const REPLY_JOB_KIND = 'reply';
 const RUNNER_KINDS = [ ...new Set( [ ...RUNNER_JOB_KINDS, REPLY_JOB_KIND ] ) ];

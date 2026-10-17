@@ -68,7 +68,7 @@ export const RUNNER_JOB_NOT_CLAIMED = 'RUNNER_JOB_NOT_CLAIMED';
 
 /** Every kind of job the server hands Steward. A claim naming any other kind is refused. */
 export const RUNNER_JOB_KINDS = Object.freeze( [
-  'design', 'git-poll', 'drop-worktree', 'flush', 'tracker-poll', 'tracker-comment', 'ticket-branch', 'observability-read',
+  'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'tracker-poll', 'tracker-comment', 'ticket-branch', 'observability-read',
   'implementation-dispatch', 'tracker-transition', 'tracker-describe', 'scaffold', 'pr-ready',
 ] );
 
