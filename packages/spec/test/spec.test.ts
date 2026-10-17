@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   agentBranchOf, AGENT_STEPS, BRANCHES_ROUTE, DOCS_ROOT_DEFAULT, itemDocsPathOf, legacyRouteOf, METHOD_MIN_RUNNER_VERSION,
   normalizeRemoteUrl, PULL_REQUEST_FILE, RUNNER_CLAIM_ROUTE, RUNNER_JOB_KINDS, RUNNER_JOB_STEPS, RUNNER_JOBS_ROUTE,
-  RUNNER_SIGNALS_ROUTE, runnerJobRoute, runnerMeets, SCAFFOLD_EXIT_BLOCKED, SCAFFOLD_EXIT_OK, SCAFFOLD_STATUSES,
+  RUNNER_REPORT_REASONS, RUNNER_SIGNALS_ROUTE, runnerJobRoute, runnerMeets, SCAFFOLD_EXIT_BLOCKED, SCAFFOLD_EXIT_OK, SCAFFOLD_STATUSES,
   SCAFFOLD_TRAILER, SERVER_AGENT_STEPS, SIGNAL_DONE, SIGNAL_FAILED, SIGNAL_NEEDS_HUMAN, SIGNAL_REJECTED,
   SIGNAL_TRAILER_KEY_PATTERN, SIGNAL_VALUES, SIGNAL_WORKING, SPECIFICATION_VERSION, STEWARD_CLAIM_ROUTE,
   STEWARD_JOBS_ROUTE, STEWARD_SIGNALS_ROUTE, stewardJobRoute,
@@ -16,6 +16,11 @@ describe( '@bett3r-dev/blueprint-spec', () => {
 
   it( 'lists each job kind once', () => {
     expect( new Set( RUNNER_JOB_KINDS ).size ).toBe( RUNNER_JOB_KINDS.length );
+  } );
+
+  it( 'lists each report reason once, agent-context-invalid among them (Blueprint ADR-137)', () => {
+    expect( new Set( RUNNER_REPORT_REASONS ).size ).toBe( RUNNER_REPORT_REASONS.length );
+    expect( RUNNER_REPORT_REASONS ).toContain( 'agent-context-invalid' );
   } );
 
   it( 'compares x.y.z versions, and an absent or malformed one meets nothing', () => {

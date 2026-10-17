@@ -107,7 +107,8 @@ export declare const RUNNER_REPORT_REASONS: readonly [
   'agent-error', 'limit-wallclock', 'auth-failed', 'claude-not-logged-in', 'rate-limited', 'claude-missing',
   'checkout-failed', 'instructions-missing', 'tools-missing', 'tools-beyond-ceiling', 'kind-unknown', 'wrong-repo',
   'non-ff', 'branch-missing', 'push-rejected', 'diverged', 'config-invalid',
-  'method-missing', 'method-unavailable', 'method-mismatch', 'method-not-loaded'
+  'method-missing', 'method-unavailable', 'method-mismatch', 'method-not-loaded',
+  'agent-context-invalid'
 ];
 export type RunnerReportReason = typeof RUNNER_REPORT_REASONS[ number ];
 

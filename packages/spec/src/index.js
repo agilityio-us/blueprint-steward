@@ -79,12 +79,17 @@ export const SERVER_AGENT_STEPS = Object.freeze( [ 'intake' ] );
 /** The steps a heartbeat may name: every agent step but the server's, in the same order. */
 export const RUNNER_JOB_STEPS = Object.freeze( AGENT_STEPS.filter( ( step ) => !SERVER_AGENT_STEPS.includes( step ) ) );
 
-/** The failure reasons Steward may report. The server stores any other as `agent-error`. */
+/**
+ * The failure reasons Steward may report. The server stores any other as `agent-error`. `agent-context-invalid`
+ * (Blueprint ADR-137): a claim's agent context names no UUID, an unknown mode, or a lost session with nothing to
+ * rebuild under, and the job fails before claude starts.
+ */
 export const RUNNER_REPORT_REASONS = Object.freeze( [
   'agent-error', 'limit-wallclock', 'auth-failed', 'claude-not-logged-in', 'rate-limited', 'claude-missing',
   'checkout-failed', 'instructions-missing', 'tools-missing', 'tools-beyond-ceiling', 'kind-unknown', 'wrong-repo',
   'non-ff', 'branch-missing', 'push-rejected', 'diverged', 'config-invalid',
   'method-missing', 'method-unavailable', 'method-mismatch', 'method-not-loaded',
+  'agent-context-invalid',
 ] );
 
 /** The most activity entries one post carries. */
