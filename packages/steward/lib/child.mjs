@@ -26,8 +26,8 @@ export const childEnv = ( env = process.env, extra = {} ) => {
   return { ...Object.fromEntries( kept ), ...extra };
 };
 
-/** A long-lived child (claude, the extractor): spawned with childEnv. */
-export const spawnChild = ( file, argv, options = {} ) => spawn( file, argv, { ...options, env: childEnv( options.env ?? process.env ) } );
+/** A long-lived child (claude, the extractor): spawned with childEnv, plus `extraEnv` (claude's CLAUDE_CONFIG_DIR). */
+export const spawnChild = ( file, argv, { extraEnv, ...options } = {} ) => spawn( file, argv, { ...options, env: childEnv( options.env ?? process.env, extraEnv ) } );
 
 // One promise chain per key: work runs one after another, and a failure does not stop the next.
 const tails = new Map();

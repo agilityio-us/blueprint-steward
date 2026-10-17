@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -31,6 +31,7 @@ const USAGE = `Usage:
   blueprint-steward start   --server <url> [--token <t>] [--repo <path>] [--session <id>] [--interval <s>] [--once]
                       [--merge-poll <s>] [--poll-once] [--tool-ceiling <tools>] [--heartbeat <s>] [--max-run-minutes <m>]
                       [--concurrency <n>] [--git-timeout <s>] [--design-tools <tools>] [--design-writes allow|forbid]
+                      [--agent-sessions-dir <dir>] [--session-prune <s>]
   blueprint-steward enqueue --server <url> [--token <t>] [--session <id>] [--branch <b>] [--prompt <text>]
 
 Steward is the part of Blueprint you run beside your own codebase, with your own keys. Only the graph, diagnostics,
@@ -72,14 +73,16 @@ your declared reader) ever leave this machine; source never does. The server nev
   --tool-ceiling  start: the most tools you allow the agent, space- or comma-separated, e.g. "mcp__blueprint Read Glob Grep".
                 The host picks each job's tools; a job asking for any tool not named here is failed before
                 the agent starts. Matching is exact: a "Bash(git *)" entry admits a job's "Bash(git *)", not its
-                "Bash"; a separator inside parentheses is part of the rule, so "Bash(git log *)" is one entry.
+                "Bash"; a separator inside parentheses is part of the rule, so "Bash(git log *)" is one entry. An
+                entry naming an MCP server, such as "mcp__blueprint", also admits each of its tools
+                ("mcp__blueprint__get_design"), and no other server's.
                 Unset (the default), any tools the host picks are allowed. An empty value is refused.
                 The agent is started with only the job's built-in tools available (claude --tools), so the
                 checkout's own .claude/settings.json cannot give it any other.
                 A tool the host offers as optional is used only when named here (or with no ceiling); otherwise
                 the job runs without it. Today that is mcp__blueprint_repo, read-only git history: a second MCP
                 server beside blueprint-mcp that runs only git log, show, grep and diff on the job's worktree.
-  --design-tools  start: tools every design job's agent gets beside the ones the server serves, space- or
+  --design-tools  start: tools every design job's agent gets beside the ones the server serves (never a reply job's), space- or
                 comma-separated, e.g. "Bash Skill Write Edit" (default: $BLUEPRINT_STEWARD_DESIGN_TOOLS, else none).
                 Each is pre-approved (--allowedTools) and, for a built-in, made available (--tools); "Skill" lets
                 the agent use the skills the checkout's project settings and plugins load. With a --tool-ceiling,
@@ -95,7 +98,20 @@ your declared reader) ever leave this machine; source never does. The server nev
   --max-run-minutes  start: the longest an agent may run (default 30, at most 35791); past it the agent is stopped
                 and the job reported failed with reason limit-wallclock.
   --concurrency start: the most jobs run at once, each session in its own worktree (default 4). Two design jobs of
-                one session never run at once: the later one waits for the earlier.
+                one session never run at once: the later one waits for the earlier. A session's reply jobs run beside
+                each other and beside its design job's agent, but never during its checkout and extraction, a flush
+                or a scaffold of that session; each counts against this number.
+  --agent-sessions-dir  start: where the agent's Claude sessions are kept, so a card thread's next question resumes
+                its conversation (default: $BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR, which the image sets to
+                /work/.agent-sessions on its /work volume). Named, it is the CLAUDE_CONFIG_DIR of every reply or
+                design job whose claim names an agent context, and claude must be logged in there (e.g.
+                CLAUDE_CODE_OAUTH_TOKEN): a fresh config dir is not logged in. Unset, claude keeps the config dir it
+                inherits, and its login, and the sessions are kept there ($CLAUDE_CONFIG_DIR, else ~/.claude). A resume
+                whose session is not there starts the session the claim names to rebuild under instead. At start and
+                daily, the session files of the ids claims named that were not used for more than 14 days are removed
+                there; no other file is.
+  --session-prune  start: seconds between those prunes after the one at start (default: $BLUEPRINT_SESSION_PRUNE_SECONDS
+                or 86400, a day; at most 2147483). Not with --once, which prunes only at start.
 
 Environment (start):
   BLUEPRINT_ROUTINE_<ALIAS>_URL    The /fire endpoint of the Claude routine an implementation-dispatch job for
@@ -116,8 +132,9 @@ const COMMANDS = [ 'push', 'start', 'enqueue' ];
 // steward routes (the legacy runner ones when the server serves no other), reports each signal with its commit's body,
 // always commits a scaffold under the Blueprint-Scaffold trailer, merges the agent branch only when its latest signal
 // is done, and posts the item's pull-request.md as the pull request's body. The server hands design jobs to no Steward
-// below METHOD_MIN_RUNNER_VERSION (from @bett3r-dev/blueprint-spec).
-const STEWARD_VERSION = '1.3.0';
+// below METHOD_MIN_RUNNER_VERSION (from @bett3r-dev/blueprint-spec). 1.4.0 runs reply jobs, declaring reply in its claim's
+// kinds, and runs a reply or design job whose claim names an agent context in that Claude session (Blueprint ADR-137).
+const STEWARD_VERSION = '1.4.0';
 const args = process.argv.slice( 2 );
 const command = args[ 0 ];
 const flag = ( name ) => {
@@ -145,6 +162,10 @@ if ( args.includes( '--tool-ceiling' ) && toolCeiling === undefined ) {
   console.error( USAGE );
   process.exit( 1 );
 }
+// A ceiling entry naming an MCP server (mcp__<server>, with no further __) admits each of that server's tools
+// (mcp__<server>__<tool>); every other entry admits exactly its own name.
+const serverEntry = ( entry ) => entry.startsWith( 'mcp__' ) && !entry.slice( 'mcp__'.length ).includes( '__' );
+const withinCeiling = ( tool ) => toolCeiling.some( ( entry ) => tool === entry || ( serverEntry( entry ) && tool.startsWith( `${ entry }__` ) ) );
 // Blueprint ADR-135: the team's own grant to every design job, beside the tools the server serves, and whether a design
 // job may change its worktree. The ceiling still holds the grant: a granted tool outside it, or a writing tool under
 // forbid, is refused here rather than at every job. The flag wins over the environment; an empty flag, or a non-empty
@@ -157,6 +178,19 @@ if ( designTools.length === 0 && ( designToolsFlagged || ( designToolsValue ?? '
   console.error( USAGE );
   process.exit( 1 );
 }
+// Blueprint ADR-137: where the Claude sessions of agent contexts are kept. Named (the flag, else
+// $BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR), it is the claude child's CLAUDE_CONFIG_DIR, which needs a login of its own;
+// unnamed, the child keeps the config dir it inherits, and its login, and the sessions are that dir's
+// ($CLAUDE_CONFIG_DIR, else ~/.claude). An empty flag is refused; an empty environment variable is none.
+const agentSessionsFlagged = args.includes( '--agent-sessions-dir' );
+const agentSessionsValue = agentSessionsFlagged ? flag( '--agent-sessions-dir' ) : process.env.BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR;
+if ( agentSessionsFlagged && ( agentSessionsValue === undefined || agentSessionsValue.trim() === '' || agentSessionsValue.startsWith( '--' ) ) ) {
+  console.error( 'blueprint-steward: --agent-sessions-dir needs a directory\n' );
+  console.error( USAGE );
+  process.exit( 1 );
+}
+const agentSessionsDir = ( agentSessionsValue ?? '' ).trim() === '' ? undefined : resolve( agentSessionsValue );
+const sessionsConfigDir = () => agentSessionsDir ?? ( process.env.CLAUDE_CONFIG_DIR || join( homedir(), '.claude' ) );
 const designWrites = flag( '--design-writes' ) ?? ( process.env.BLUEPRINT_STEWARD_DESIGN_WRITES || 'allow' );
 if ( ![ 'allow', 'forbid' ].includes( designWrites ) ) {
   console.error( 'blueprint-steward: --design-writes is allow or forbid\n' );
@@ -169,7 +203,8 @@ if ( designWrites === 'forbid' && writingGranted.length > 0 ) {
   console.error( `blueprint-steward: --design-writes forbid, but --design-tools grants ${ writingGranted.join( ' ' ) }, which can write to the worktree\n` );
   process.exit( 1 );
 }
-const grantedBeyondCeiling = toolCeiling === undefined ? [] : designTools.filter( ( tool ) => !toolCeiling.includes( tool ) );
+// Held to the ceiling as a job's tools are (withinCeiling), so an MCP server entry admits that server's tools.
+const grantedBeyondCeiling = toolCeiling === undefined ? [] : designTools.filter( ( tool ) => !withinCeiling( tool ) );
 if ( grantedBeyondCeiling.length > 0 ) {
   console.error( `blueprint-steward: --design-tools grants ${ grantedBeyondCeiling.join( ' ' ) }, beyond this Steward's --tool-ceiling "${ toolCeiling.join( ' ' ) }"\n` );
   process.exit( 1 );
@@ -200,6 +235,15 @@ const gitTimeoutSeconds = positiveFlag( '--git-timeout', 600, 2 ** 31 / 1000 - 1
 for ( const [ name, value, limit ] of [ [ '--heartbeat', heartbeatSeconds, HEARTBEAT_MAX_SECONDS ], [ '--max-run-minutes', maxRunMinutes, MAX_RUN_MINUTES_MAX ], [ '--git-timeout', gitTimeoutSeconds, 2 ** 31 / 1000 - 1 ] ] ) {
   if ( value !== undefined ) continue;
   console.error( `blueprint-steward: ${ name } needs a positive number of at most ${ limit }\n` );
+  console.error( USAGE );
+  process.exit( 1 );
+}
+// Blueprint ADR-137: the cadence of the daily agent session prune, one setInterval, whose delay is at most 2^31-1 ms (a larger
+// one fires after 1 ms), as --git-timeout's. A value that is no positive number, or past that bound, is refused.
+const SESSION_PRUNE_MAX_SECONDS = Math.floor( ( 2 ** 31 - 1 ) / 1000 );
+const sessionPruneSeconds = Number( flag( '--session-prune' ) || process.env.BLUEPRINT_SESSION_PRUNE_SECONDS || 24 * 60 * 60 );
+if ( command === 'start' && !( Number.isFinite( sessionPruneSeconds ) && sessionPruneSeconds > 0 && sessionPruneSeconds <= SESSION_PRUNE_MAX_SECONDS ) ) {
+  console.error( `blueprint-steward: --session-prune (or BLUEPRINT_SESSION_PRUNE_SECONDS) needs a positive number of at most ${ SESSION_PRUNE_MAX_SECONDS }\n` );
   console.error( USAGE );
   process.exit( 1 );
 }
@@ -583,6 +627,101 @@ const methodLoadedBy = ( line, names ) => {
     && names.every( ( name ) => event.plugins.some( ( plugin ) => plugin?.name === name ) );
 };
 
+// Blueprint ADR-137 decision 1: a card thread's answer. Its kind is not in @bett3r-dev/blueprint-spec's RUNNER_JOB_KINDS
+// yet, which the server's claim route admits beside them. A claim names it explicitly (its kinds are JOB_HANDLERS'):
+// a claim naming no kinds counts as not running replies, and the server then gives its design claims no agent context.
+const REPLY_JOB_KIND = 'reply';
+const RUNNER_KINDS = [ ...new Set( [ ...RUNNER_JOB_KINDS, REPLY_JOB_KIND ] ) ];
+
+// Blueprint ADR-137 decision 2: a reply or design claim may name an agent context, a Claude session the server minted
+// the id of. A design claim names the designer's, and only when the claim declared reply. `fresh` and `rebuilt` start it
+// (--session-id); `resume` continues it (--resume) when its session file is in the sessions dir (sessionsConfigDir), and
+// otherwise starts the claim's rebuildSessionId on its rebuildPrompt instead. The mode reported is resumed, rebuilt or fresh, with the id the run used. A claim naming none, or a job of another kind,
+// keeps no session on disk. A context naming no UUID, an unknown mode, or a lost session with nothing to rebuild under
+// fails the job agent-context-invalid before claude starts.
+const AGENT_CONTEXT_KINDS = [ 'design', REPLY_JOB_KIND ];
+// The reason a refused agent context is reported with, named for the claim field as instructions-missing and tools-missing
+// are. A server whose RUNNER_REPORT_REASONS does not name it yet stores it as agent-error.
+const AGENT_CONTEXT_INVALID = 'agent-context-invalid';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Seen with claude 2.1.301 and 2.1.302: a session is written to <CLAUDE_CONFIG_DIR>/projects/<its starting cwd, / and . as ->/<id>.jsonl,
+// and a --resume from another directory appends to that same file, so any project directory may hold it.
+const sessionFileExists = ( id ) => {
+  const projects = join( sessionsConfigDir(), 'projects' );
+  return existsSync( projects ) && readdirSync( projects ).some( ( dir ) => existsSync( join( projects, dir, `${ id }.jsonl` ) ) );
+};
+// Blueprint ADR-137: the agent contexts the server issued this Steward, kept as the session ids its claims
+// had it run, in <repo>.blueprint-worktrees/.agent-contexts.json (a name no session id can take, as .method). Only their
+// session files are ever pruned: one idle (unmodified) for more than 14 days is removed from the sessions dir, at start
+// and daily, and a later resume of it rebuilds. Any other file there, whatever its age, is the team's and stays.
+const SESSION_IDLE_MS = 14 * 24 * 60 * 60 * 1000;
+const issuedContextsFile = () => join( WORKTREE_ROOT, '.agent-contexts.json' );
+const issuedContexts = () => {
+  try {
+    const ids = JSON.parse( readFileSync( issuedContextsFile(), 'utf-8' ) );
+    return Array.isArray( ids ) ? ids.filter( ( id ) => typeof id === 'string' && UUID.test( id ) ) : [];
+  } catch {
+    return [];
+  }
+};
+const keepIssuedContexts = ( ids ) => {
+  mkdirSync( WORKTREE_ROOT, { recursive: true } );
+  const next = `${ issuedContextsFile() }.${ process.pid }.tmp`;
+  writeFileSync( next, JSON.stringify( ids ) );
+  renameSync( next, issuedContextsFile() );
+};
+const recordIssuedContext = ( id ) => {
+  const ids = issuedContexts();
+  if ( !ids.includes( id ) ) keepIssuedContexts( [ ...ids, id ] );
+};
+const pruneIdleSessions = () => {
+  const ids = issuedContexts();
+  const projects = join( sessionsConfigDir(), 'projects' );
+  if ( ids.length === 0 || !existsSync( projects ) ) return;
+  const now = Date.now();
+  const pruned = [];
+  for ( const dir of readdirSync( projects ) ) {
+    for ( const id of ids ) {
+      const file = join( projects, dir, `${ id }.jsonl` );
+      if ( existsSync( file ) && now - statSync( file ).mtimeMs > SESSION_IDLE_MS ) {
+        rmSync( file, { force: true } );
+        pruned.push( file );
+      }
+    }
+  }
+  if ( pruned.length === 0 ) return;
+  // An id is forgotten once no file of it is left; one still in another project dir stays for a later prune.
+  keepIssuedContexts( ids.filter( ( id ) => sessionFileExists( id ) ) );
+  console.error( `blueprint-steward: pruned ${ pruned.length } agent session${ pruned.length === 1 ? '' : 's' } idle for more than 14 days: ${ pruned.join( ' ' ) }` );
+};
+const agentSessionOf = ( job ) => {
+  const context = job.agentContext;
+  if ( !AGENT_CONTEXT_KINDS.includes( job.kind ) || context === undefined || context === null ) return { args: [ '--no-session-persistence' ] };
+  const refused = ( why ) => ( { refused: { ok: false, reason: AGENT_CONTEXT_INVALID, result: `the claim's agent context ${ why }; the agent was not started` } } );
+  const { sessionId: id, mode, rebuildSessionId, rebuildPrompt } = context;
+  if ( typeof id !== 'string' || !UUID.test( id ) ) return refused( 'names no session id that is a UUID' );
+  if ( mode === 'fresh' || mode === 'rebuilt' ) return { args: [ '--session-id', id ], context: { mode, sessionId: id } };
+  if ( mode !== 'resume' ) return refused( `has mode ${ JSON.stringify( mode ) }, not fresh, rebuilt or resume` );
+  if ( sessionFileExists( id ) ) return { args: [ '--resume', id ], context: { mode: 'resumed', sessionId: id } };
+  if ( typeof rebuildSessionId !== 'string' || !UUID.test( rebuildSessionId ) || typeof rebuildPrompt !== 'string' || rebuildPrompt.trim() === '' ) {
+    return refused( `resumes session ${ id }, which is not in ${ join( sessionsConfigDir(), 'projects' ) }, and names no rebuildSessionId and rebuildPrompt to rebuild it under` );
+  }
+  return { args: [ '--session-id', rebuildSessionId ], rebuildPrompt, context: { mode: 'rebuilt', sessionId: rebuildSessionId } };
+};
+// Blueprint ADR-137 decision 2: the context size a run started at, which the report carries: its first assistant event's
+// input, cache creation and cache read tokens. Not the result event's usage, which sums every turn of the run
+// (test/fixtures/claude-2.1.301-stream-resumed-two-turns.jsonl, captured from claude 2.1.301). null when no
+// assistant event carries usage.
+const startedContextTokens = ( out ) => {
+  for ( const line of out.split( '\n' ) ) {
+    const event = eventOf( line );
+    const usage = event?.type === 'assistant' ? event.message?.usage : undefined;
+    const counts = [ usage?.input_tokens, usage?.cache_creation_input_tokens ?? 0, usage?.cache_read_input_tokens ?? 0 ];
+    if ( counts.every( tokenCount ) ) return counts.reduce( ( a, b ) => a + b, 0 );
+  }
+  return null;
+};
+
 const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActivity = () => undefined, designPlugins = [] ) => new Promise( ( resolvePromise ) => {
   // The board tool writes with the key the host minted for this job alone, never the org key. A
   // claim with none (a host from before job keys) is failed rather than handing the agent the org key.
@@ -590,6 +729,13 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     resolvePromise( { ok: false, result: 'the claim carried no job key, and the agent is never handed the org key' } );
     return;
   }
+  const session = agentSessionOf( job );
+  if ( session.refused ) {
+    resolvePromise( session.refused );
+    return;
+  }
+  if ( session.context !== undefined && agentSessionsDir !== undefined ) mkdirSync( agentSessionsDir, { recursive: true } );
+  if ( session.context !== undefined ) recordIssuedContext( session.context.sessionId );
   const dir = mkdtempSync( join( tmpdir(), 'blueprint-steward-' ) );
   const mcpConfig = join( dir, 'mcp.json' );
   writeFileSync( mcpConfig, JSON.stringify( {
@@ -608,15 +754,19 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     },
   } ) );
   const { text } = job.instructions;
-  const prompt = job.prompt ? `${ text }\n\nThe owner asks: ${ job.prompt }` : text;
+  const prompt = session.rebuildPrompt !== undefined ? `${ text }\n\n${ session.rebuildPrompt }`
+    : job.prompt ? `${ text }\n\nThe owner asks: ${ job.prompt }` : text;
   const claude = stewardEnv( 'CLAUDE' ) ?? 'claude';
   // The tools are exactly the ones the host served with the job, never read from the text.
   // --allowedTools only pre-approves them; --tools limits the built-in tools the agent has at all to the job's
   // (a scoped rule such as "Bash(git *)" contributes its bare name; "" leaves none), so a permissions.allow or
   // defaultMode in the checkout's project settings cannot add another. MCP tools are not built-ins: they come
-  // only from this MCP config (--strict-mcp-config) and stay out of --tools. The child keeps no session on disk, loads only this MCP config and the worktree's project settings (not the operator's
+  // only from this MCP config (--strict-mcp-config) and stay out of --tools. The child keeps no session on disk unless
+  // its claim names an agent context (agentSessionOf), loads only this MCP config and the worktree's project settings (not the team's
   // user or local settings, where user hooks live), and is never --bare: --bare drops the OAuth and keychain login
-  // a subscription runs on.
+  // a subscription runs on. For the same login, CLAUDE_CONFIG_DIR is set only when --agent-sessions-dir names one;
+  // without it the child inherits the team's config dir and its login, and a named dir needs a login of its own
+  // (the image logs in with CLAUDE_CODE_OAUTH_TOKEN).
   const builtIn = [ ...new Set( job.tools.filter( ( tool ) => !tool.startsWith( 'mcp__' ) ).map( ( tool ) => tool.replace( /\(.*$/, '' ) ) ) ];
   const disallowed = Array.isArray( job.disallowedTools ) ? job.disallowedTools.filter( ( tool ) => typeof tool === 'string' && tool !== '' ) : [];
   // The host picks the model and the optional per-run cap (USD micros) and the claim carries both; claude
@@ -629,7 +779,7 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     '--allowedTools', job.tools.join( ' ' ),
     '--tools', builtIn.join( ',' ),
     ...( disallowed.length > 0 ? [ '--disallowedTools', disallowed.join( ' ' ) ] : [] ),
-    '--no-session-persistence',
+    ...session.args,
     '--setting-sources', 'project',
     // The verified method zip, loaded for this run alone; stream-json (which -p accepts only with --verbose)
     // so the init event shows whether claude loaded it.
@@ -639,7 +789,7 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     '--output-format', 'stream-json', '--verbose',
     ...model,
     ...cap,
-  ], { cwd: worktree, stdio: [ 'ignore', 'pipe', 'inherit' ] } );
+  ], { cwd: worktree, stdio: [ 'ignore', 'pipe', 'inherit' ], ...( session.context === undefined || agentSessionsDir === undefined ? {} : { extraEnv: { CLAUDE_CONFIG_DIR: agentSessionsDir } } ) } );
   // The operator reads one line per event, tagged with the job (lib/activity.mjs); the stream as claude wrote it is kept
   // whole in the job's temporary directory, and the board is relayed the tool names alone.
   const tag = `[${ job.id.slice( 0, 8 ) }]`;
@@ -695,10 +845,11 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
   schedule();
   // Past --max-run-minutes the agent is stopped and the job fails limit-wallclock.
   timers.push( setTimeout( () => { stop( 'wallclock' ); }, maxRunMinutes * 60_000 ) );
-  const finish = ( outcome ) => {
+  // Blueprint ADR-137: once claude has run, the outcome carries the agent context it ran in and the size it started at.
+  const finish = ( outcome, ran = true ) => {
     exited = true;
     for ( const timer of timers ) clearTimeout( timer );
-    resolvePromise( outcome );
+    resolvePromise( ran && session.context !== undefined ? { ...outcome, context: { ...session.context, tokens: startedContextTokens( out ) } } : outcome );
   };
   child.stdout.on( 'data', ( chunk ) => {
     out += chunk;
@@ -713,7 +864,7 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
   } );
   // A claude that is not on PATH (or not at BLUEPRINT_STEWARD_CLAUDE) fails the spawn with ENOENT: claude-missing.
   child.on( 'error', ( err ) => {
-    finish( { ok: false, ...( err.code === 'ENOENT' ? { reason: 'claude-missing' } : {} ), result: `could not start ${ claude }: ${ err.message }` } );
+    finish( { ok: false, ...( err.code === 'ENOENT' ? { reason: 'claude-missing' } : {} ), result: `could not start ${ claude }: ${ err.message }` }, false );
   } );
   child.on( 'close', ( code ) => {
     readLines( lines.rest() );
@@ -947,10 +1098,8 @@ const isWorktreeOfRepo = async ( dir ) => {
 // A new worktree is added; an existing one is reused and moved. Every git call here is async and queued (lib/child.mjs),
 // so Steward never runs two of its own git commands against the repository at once and never stops its heartbeats. Any failure throws with reason checkout-failed.
 const checkoutFailed = ( message ) => Object.assign( new Error( message ), { reason: 'checkout-failed' } );
-const prepareWorktree = async ( sessionId, branch, onStep = async () => undefined ) => {
-  await onStep( 'worktree' );
-  const dir = worktreeOf( sessionId );
-  if ( dir === undefined ) throw checkoutFailed( `session id ${ JSON.stringify( sessionId ) } is not one plain path segment, so it names no worktree` );
+// The commit `branch` names after a fetch of origin: origin's, else the checkout's own; the checkout's HEAD with no branch.
+const branchTip = async ( branch ) => {
   if ( await git( 'remote get-url origin' ) !== undefined ) {
     const fetched = await runGit( repo, [ 'fetch', '--quiet', 'origin' ] );
     if ( fetched.status !== 0 ) throw checkoutFailed( `git fetch origin failed: ${ gitFailure( fetched ) }` );
@@ -962,6 +1111,13 @@ const prepareWorktree = async ( sessionId, branch, onStep = async () => undefine
     if ( found.status === 0 ) { sha = found.stdout.trim(); break; }
   }
   if ( sha === undefined ) throw checkoutFailed( `branch ${ branch } is neither on origin nor in ${ repo }` );
+  return sha;
+};
+const prepareWorktree = async ( sessionId, branch, onStep = async () => undefined ) => {
+  await onStep( 'worktree' );
+  const dir = worktreeOf( sessionId );
+  if ( dir === undefined ) throw checkoutFailed( `session id ${ JSON.stringify( sessionId ) } is not one plain path segment, so it names no worktree` );
+  const sha = await branchTip( branch );
   if ( await isWorktreeOfRepo( dir ) ) {
     console.error( `blueprint-steward: moving the worktree of session ${ sessionId } to ${ branch ?? 'HEAD' } (${ sha.slice( 0, 8 ) })` );
     const moved = await runGit( dir, [ 'checkout', '--quiet', '--force', '--detach', sha ] );
@@ -978,22 +1134,76 @@ const prepareWorktree = async ( sessionId, branch, onStep = async () => undefine
   return dir;
 };
 
-// The sessions with a design job claimed and not yet finished here, counted, and
-// the tail of each one's jobs. A session's jobs run one after another, so two never share its worktree at once, and
+// The sessions with a job in their lane claimed and not yet finished here, counted, so
 // a drop-worktree job never removes a worktree a job holds: from before its checkout until its agent has exited.
+// Blueprint ADR-137: each session's worktree lock. A design round's checkout and extraction, a flush and a scaffold
+// hold it exclusively; a reply, and a design round's agent once its extraction is pushed, hold it shared, so replies run
+// beside each other and beside the round's agent. Waiters are granted in the order they asked: a shared request behind
+// a waiting exclusive one waits for it.
 const sessionJobs = new Map();
-const sessionTails = new Map();
-const inSession = ( sessionId, work ) => {
+const sessionLocks = new Map();
+const grantWaiters = ( sessionId ) => {
+  const lock = sessionLocks.get( sessionId );
+  if ( lock === undefined ) return;
+  while ( lock.queue.length > 0 && !lock.writer && ( lock.queue[ 0 ].mode === 'shared' || lock.readers === 0 ) ) {
+    const { mode, granted } = lock.queue.shift();
+    if ( mode === 'exclusive' ) lock.writer = true;
+    else lock.readers += 1;
+    granted();
+  }
+  if ( !lock.writer && lock.readers === 0 && lock.queue.length === 0 ) sessionLocks.delete( sessionId );
+};
+// A hold on the session's worktree in `mode`, once granted: `share()` turns an exclusive hold shared, `exclusive()` lets a
+// shared one go and waits its turn for the worktree alone, and `release()` lets it go.
+const holdSession = async ( sessionId, mode ) => {
+  let held;
+  const take = async ( wanted ) => {
+    await new Promise( ( granted ) => {
+      if ( !sessionLocks.has( sessionId ) ) sessionLocks.set( sessionId, { readers: 0, writer: false, queue: [] } );
+      sessionLocks.get( sessionId ).queue.push( { mode: wanted, granted } );
+      grantWaiters( sessionId );
+    } );
+    held = wanted;
+  };
+  const release = () => {
+    const lock = sessionLocks.get( sessionId );
+    if ( held === 'exclusive' ) lock.writer = false;
+    if ( held === 'shared' ) lock.readers -= 1;
+    held = undefined;
+    grantWaiters( sessionId );
+  };
+  await take( mode );
+  return {
+    share: () => {
+      if ( held !== 'exclusive' ) return;
+      const lock = sessionLocks.get( sessionId );
+      lock.writer = false;
+      lock.readers += 1;
+      held = 'shared';
+      grantWaiters( sessionId );
+    },
+    exclusive: async () => {
+      if ( held === 'exclusive' ) return;
+      release();
+      await take( 'exclusive' );
+    },
+    release,
+  };
+};
+const inSession = async ( sessionId, mode, work ) => {
   sessionJobs.set( sessionId, ( sessionJobs.get( sessionId ) ?? 0 ) + 1 );
-  const ran = ( sessionTails.get( sessionId ) ?? Promise.resolve() ).then( work );
-  const tail = ran.catch( () => undefined ).finally( () => {
+  try {
+    const hold = await holdSession( sessionId, mode );
+    try {
+      return await work( hold );
+    } finally {
+      hold.release();
+    }
+  } finally {
     const left = sessionJobs.get( sessionId ) - 1;
     if ( left === 0 ) sessionJobs.delete( sessionId );
     else sessionJobs.set( sessionId, left );
-    if ( sessionTails.get( sessionId ) === tail ) sessionTails.delete( sessionId );
-  } );
-  sessionTails.set( sessionId, tail );
-  return ran;
+  }
 };
 
 // The host queues a drop-worktree job for a session that went quiet. Its worktree is removed and
@@ -1020,7 +1230,9 @@ const dropWorktree = async ( sessionId ) => {
 // binding a session that had no branch to bind away from.
 // The host serves the text a hosted turn runs, and Steward keeps no prompt of
 // its own. A design claim without it is failed before any checkout, push or agent.
-const runJob = async ( job, sessionId ) => {
+// Blueprint ADR-137: `hold` is the job's hold on the session's worktree (holdSession): a design round's is exclusive and
+// turns shared once its extraction is pushed; a reply's is shared from the start.
+const runJob = async ( job, sessionId, hold ) => {
   if ( typeof job.instructions?.text !== 'string' || job.instructions.text.trim() === '' ) {
     return { ok: false, reason: 'instructions-missing', result: 'the claim carried no hosted-turn instructions, and Steward keeps no prompt of its own' };
   }
@@ -1030,7 +1242,7 @@ const runJob = async ( job, sessionId ) => {
   if ( tools.length === 0 ) {
     return { ok: false, reason: 'tools-missing', result: 'the claim carried no tools, and Steward picks none of its own' };
   }
-  const beyond = toolCeiling === undefined ? [] : tools.filter( ( tool ) => !toolCeiling.includes( tool ) );
+  const beyond = toolCeiling === undefined ? [] : tools.filter( ( tool ) => !withinCeiling( tool ) );
   if ( beyond.length > 0 ) {
     return { ok: false, reason: 'tools-beyond-ceiling', result: `the job asks for ${ beyond.join( ' ' ) }, beyond this Steward's --tool-ceiling "${ toolCeiling.join( ' ' ) }"` };
   }
@@ -1062,17 +1274,21 @@ const runJob = async ( job, sessionId ) => {
   const steps = async () => {
     let dir;
     try {
-      dir = await prepareWorktree( sessionId, branch, onStep );
+      dir = job.kind === REPLY_JOB_KIND ? await replyWorktree( sessionId, branch, onStep, hold ) : await prepareWorktree( sessionId, branch, onStep );
     } catch ( err ) {
       return { ok: false, reason: err.reason ?? 'checkout-failed', result: err.message };
     }
     const designPlugins = await designPluginsFor( dir );
     if ( designPlugins.refused ) return designPlugins.refused;
-    await push( { extract: true, sessionId, branch: branch ?? await git( 'rev-parse --abbrev-ref HEAD' ), dir, worktree: true, onStep } );
+    // Blueprint ADR-137: a reply job answers on the board as it stands, so it neither extracts nor pushes.
+    if ( job.kind !== REPLY_JOB_KIND ) await push( { extract: true, sessionId, branch: branch ?? await git( 'rev-parse --abbrev-ref HEAD' ), dir, worktree: true, onStep } );
+    // Past its extraction a design round's agent shares the worktree with the session's replies.
+    hold.share();
     // The agent's step is beaten before claude is spawned.
     await onStep( 'agent' );
-    // Blueprint ADR-135: the team's --design-tools join the served and optional tools, each once.
-    const granted = [ ...new Set( [ ...tools, ...optionalTools, ...designTools ] ) ];
+    // Blueprint ADR-135: the team's --design-tools join the served and optional tools, each once; never a reply's,
+    // which shares the worktree read-only.
+    const granted = [ ...new Set( [ ...tools, ...optionalTools, ...( job.kind === REPLY_JOB_KIND ? [] : designTools ) ] ) ];
     const outcome = await runAgent( { ...job, tools: granted }, sessionId, dir, method, optionalTools, relay.push, designPlugins );
     await logLeftovers( job, dir );
     return outcome;
@@ -1087,6 +1303,22 @@ const runJob = async ( job, sessionId ) => {
     console.log( `[${ job.id.slice( 0, 8 ) }] ${ outcome.ok ? 'done' : `failed${ outcome.reason ? ` (${ outcome.reason })` : '' }` }` );
   }
   return outcome;
+};
+
+// Blueprint ADR-137: a reply reads the session's worktree as it stands, under its shared hold, when the worktree is at
+// the tip of the job's branch; otherwise it waits for the worktree exclusively, adds it or moves it there, and shares it
+// again.
+const replyWorktree = async ( sessionId, branch, onStep, hold ) => {
+  await onStep( 'worktree' );
+  const dir = worktreeOf( sessionId );
+  const sha = await branchTip( branch );
+  if ( dir !== undefined && await isWorktreeOfRepo( dir ) && ( await runGit( dir, [ 'rev-parse', 'HEAD' ] ) ).stdout.trim() === sha ) return dir;
+  await hold.exclusive();
+  try {
+    return await prepareWorktree( sessionId, branch );
+  } finally {
+    hold.share();
+  }
 };
 
 // A flush job has the host's session bundle committed to origin's branch by
@@ -1196,14 +1428,17 @@ const listOrigin = async () => {
   return { heads, defaultBranch: await remoteDefaultBranch() };
 };
 const JOB_HANDLERS = new Map( [
-  [ 'design', ( job ) => inSession( job.sessionId, () => runJob( job, job.sessionId ) ) ],
+  [ 'design', ( job ) => inSession( job.sessionId, 'exclusive', ( hold ) => runJob( job, job.sessionId, hold ) ) ],
+  // Blueprint ADR-137: a card thread's answer runs as a design job does, in the session's lane, without extraction,
+  // holding the worktree shared.
+  [ REPLY_JOB_KIND, ( job ) => inSession( job.sessionId, 'shared', ( hold ) => runJob( job, job.sessionId, hold ) ) ],
   [ GIT_POLL_JOB_KIND, () => runGitPoll() ],
   [ 'drop-worktree', ( job ) => dropWorktree( job.sessionId ) ],
-  [ 'flush', ( job ) => inSession( job.sessionId, () => runFlush( job ) ) ],
+  [ 'flush', ( job ) => inSession( job.sessionId, 'exclusive', () => runFlush( job ) ) ],
   [ 'ticket-branch', ( job ) => runTicketBranch( job ) ],
   // pr-ready takes the ticket branch's draft PR out of draft, GitHub only (lib/pr-ready.mjs).
   [ PR_READY_JOB_KIND, async ( job ) => runPrReady( job, { repo, remoteUrl: await git( 'remote get-url origin' ) } ) ],
-  [ SCAFFOLD_JOB_KIND, ( job ) => inSession( job.sessionId, () => runScaffold( job ) ) ],
+  [ SCAFFOLD_JOB_KIND, ( job ) => inSession( job.sessionId, 'exclusive', () => runScaffold( job ) ) ],
   // A read for the hosted agent's KPI lookup, outside the session's lane (inSession), so it never
   // waits behind the session's own running design job; in the session's worktree, else the --repo checkout.
   [ OBSERVABILITY_READ_JOB_KIND, async ( job ) => runObservabilityRead( job, { dir: await checkoutOf( job.sessionId ) } ) ],
@@ -1219,8 +1454,9 @@ const JOB_HANDLERS = new Map( [
 // a dispatch only where its alias is held. Never the URL or the token.
 const ROUTINE_ALIASES = routineAliases();
 // A handler for a kind the server does not know would make every claim a 400 RUNNER_KIND_UNKNOWN; refuse to start.
-const unlisted = [ ...JOB_HANDLERS.keys() ].filter( ( kind ) => !RUNNER_JOB_KINDS.includes( kind ) );
-if ( unlisted.length > 0 ) throw new Error( `blueprint-steward: job kinds ${ unlisted.join( ', ' ) } have handlers but are not in RUNNER_JOB_KINDS` );
+// Blueprint ADR-137: the server knows RUNNER_JOB_KINDS and reply (RUNNER_KINDS).
+const unlisted = [ ...JOB_HANDLERS.keys() ].filter( ( kind ) => !RUNNER_KINDS.includes( kind ) );
+if ( unlisted.length > 0 ) throw new Error( `blueprint-steward: job kinds ${ unlisted.join( ', ' ) } have handlers but are not in RUNNER_JOB_KINDS or reply` );
 const runKind = ( job ) => {
   const handler = JOB_HANDLERS.get( job.kind );
   if ( handler === undefined ) {
@@ -1249,6 +1485,18 @@ try {
       setTimeout( mergePoll, mergePollMs );
     };
     if ( !args.includes( '--once' ) ) mergePoll();
+    // Blueprint ADR-137: issued agent sessions idle for more than 14 days are pruned before the first claim, and every
+    // --session-prune seconds (a day by default) after.
+    // A prune that fails is logged and Steward goes on.
+    const prune = () => {
+      try {
+        pruneIdleSessions();
+      } catch ( err ) {
+        console.error( `blueprint-steward: agent session prune: ${ err.message }` );
+      }
+    };
+    prune();
+    if ( !args.includes( '--once' ) ) setInterval( prune, sessionPruneSeconds * 1000 ).unref();
     console.error( `blueprint-steward: polling ${ server } every ${ intervalMs / 1000 }s against ${ repo }, up to ${ concurrency } jobs at once` );
     const runAndReport = async ( job ) => {
       console.error( `blueprint-steward: claimed job ${ job.id } (${ job.kind })` );
@@ -1266,6 +1514,8 @@ try {
       await call( stewardJobRoute( job.id ), {
         status: outcome.ok ? 'done' : 'failed', result: outcome.result,
         ...( outcome.reason ? { reason: outcome.reason } : {} ), ...( outcome.usage ? { usage: outcome.usage } : {} ),
+        // Blueprint ADR-137 decision 2: how the agent context started (resumed, rebuilt or fresh), the session id and its size.
+        ...( outcome.context ? { context: outcome.context } : {} ),
       }, { sessionId: job.sessionId } )
         .catch( ( err ) => { console.error( `blueprint-steward: report failed: ${ err.message }` ); } );
       console.error( `blueprint-steward: job ${ job.id } ${ outcome.ok ? 'done' : 'failed' }` );

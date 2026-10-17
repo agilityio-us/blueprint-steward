@@ -1,6 +1,6 @@
 {
   "name": "@bett3r-dev/blueprint-steward",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Steward: the part of Blueprint a team runs beside its own codebase, holding its keys and acting for the Blueprint server.",
   "license": "MIT",
   "repository": {
