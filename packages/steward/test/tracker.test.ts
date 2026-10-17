@@ -47,10 +47,10 @@ const POLL = {
 const CREDENTIAL = { email: 'bot@example.com', apiToken: 'jira-token' };
 
 describe( 'blueprint-steward tracker kinds', () => {
-  it( 'Given a Jira credential whole and missing a part when the tracker handlers are built then only the whole credential declares tracker-poll, tracker-comment, tracker-transition and tracker-describe', () => {
+  it( 'Given a Jira credential whole and missing a part when the tracker handlers are built then only the whole credential declares tracker-poll, tracker-comment, tracker-transition, tracker-describe and tracker-create', () => {
     const full = { baseUrl: 'https://acme.atlassian.net', ...CREDENTIAL };
 
-    expect( trackerJobHandlers( full ).map(( [ kind ] ) => kind )).toEqual( [ 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe' ] );
+    expect( trackerJobHandlers( full ).map(( [ kind ] ) => kind )).toEqual( [ 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe', 'tracker-create' ] );
     expect( trackerJobHandlers( {} )).toEqual( [] );
     expect( trackerJobHandlers( { ...full, apiToken: '' } )).toEqual( [] );
     expect( trackerJobHandlers( { ...full, baseUrl: undefined } )).toEqual( [] );
@@ -430,5 +430,91 @@ describe( 'blueprint-steward tracker kinds', () => {
     // THEN
     expect( jira.seen ).toEqual( [] );
     expect( outcomes.map( outcome => [ outcome.ok, outcome.reason ] )).toEqual( [ [ false, undefined ], [ false, 'auth-failed' ] ] );
+  } );
+
+  // A tracker-create job carries the ticket the server drafted, { boardId, projectKey, issueTypeId, summary, description,
+  // label } (Blueprint's trackerBoards.ts TrackerCreatePayload). Steward searches the session's label first, so a
+  // re-press after a lost report finds the ticket it made; it creates only on no hit, and reports { key }, which
+  // Blueprint's designIntakes.ts reads.
+  const CREATE = {
+    id: 'job-7', kind: 'tracker-create', sessionId: 's-7',
+    payload: { boardId: 'board-1', projectKey: 'PROJ', issueTypeId: '10001', summary: 'Checkout redesign', description: 'Drafted on the board.', label: 'blueprint-session-s-7' }
+  };
+  /** A fixture Jira whose label search answers `labelled` and whose issue POST answers `created`. */
+  const creatingJira = ( labelled: string[], created: { status?: number; body: unknown } ) => fixtureJira(( path, _query, method ) => {
+    if ( path === '/rest/api/3/search/jql' ) return { body: { issues: labelled.map( key => ( { key, fields: {} } )) } };
+    if ( path === '/rest/api/2/issue' && method === 'POST' ) return created;
+    return { status: 404, body: {} };
+  } );
+  const postsOf = ( jira: { seen: Seen[]; bodies: { text: string }[] } ) =>
+    jira.seen.flatMap(( request, index ) => ( request.method === 'POST' ? [ { ...request, body: JSON.parse( jira.bodies[ index ]?.text ?? 'null' ) } ] : [] ));
+
+  it( 'Given no issue carries the session label when a tracker-create job runs then it searches the label first, POSTs one issue with the payload\'s project, work type, summary, description and label, and reports the returned key', async () => {
+    // GIVEN
+    const jira = await creatingJira( [], { status: 201, body: { id: '10100', key: 'PROJ-7', self: 'https://acme.atlassian.net/rest/api/2/issue/10100' } } );
+
+    // WHEN
+    const outcome = await handlerFor( jira.baseUrl, 'tracker-create' )( CREATE );
+
+    // THEN
+    expect( jira.seen.map( request => [ request.method, request.path, request.query.jql ] )).toEqual( [
+      [ 'GET', '/rest/api/3/search/jql', 'labels = "blueprint-session-s-7"' ], [ 'POST', '/rest/api/2/issue', undefined ]
+    ] );
+    expect( postsOf( jira )).toEqual( [ { method: 'POST', path: '/rest/api/2/issue', query: {}, authorization: BASIC, body: { fields: {
+      project: { key: 'PROJ' }, issuetype: { id: '10001' }, summary: 'Checkout redesign', description: 'Drafted on the board.', labels: [ 'blueprint-session-s-7' ]
+    } } } ] );
+    expect( { ok: outcome.ok, reason: outcome.reason, result: JSON.parse( outcome.result ?? 'null' ) } ).toEqual( { ok: true, reason: undefined, result: { key: 'PROJ-7' } } );
+  } );
+
+  it( 'Given PROJ-5 already carries the session label when a tracker-create job runs then it posts nothing and reports PROJ-5 with alreadyThere', async () => {
+    // GIVEN
+    const jira = await creatingJira( [ 'PROJ-5' ], { status: 201, body: { id: '10101', key: 'PROJ-8' } } );
+
+    // WHEN
+    const outcome = await handlerFor( jira.baseUrl, 'tracker-create' )( CREATE );
+
+    // THEN
+    expect( postsOf( jira )).toEqual( [] );
+    expect( { ok: outcome.ok, result: JSON.parse( outcome.result ?? 'null' ) } ).toEqual( { ok: true, result: { key: 'PROJ-5', alreadyThere: true } } );
+  } );
+
+  it( 'Given Jira answers 400 on create when a tracker-create job runs then it fails, having posted once, and a credential Jira refuses fails it auth-failed', async () => {
+    // GIVEN
+    const jira = await creatingJira( [], { status: 400, body: { errorMessages: [], errors: { summary: 'Summary is required.' } } } );
+    const refusing = await fixtureJira(() => ( { status: 401, body: {} } ));
+
+    // WHEN
+    const outcomes = [ await handlerFor( jira.baseUrl, 'tracker-create' )( CREATE ), await handlerFor( refusing.baseUrl, 'tracker-create' )( CREATE ) ];
+
+    // THEN
+    expect( postsOf( jira ).map( request => request.path )).toEqual( [ '/rest/api/2/issue' ] );
+    expect( outcomes.map( outcome => [ outcome.ok, outcome.reason, outcome.result ] )).toEqual( [
+      [ false, undefined, 'POST /rest/api/2/issue failed: 400' ], [ false, 'auth-failed', 'GET /rest/api/3/search/jql failed: 401' ]
+    ] );
+  } );
+
+  it( 'Given Jira answers a create with no key when a tracker-create job runs then it fails, reporting no key for the server to link', async () => {
+    // GIVEN
+    const jira = await creatingJira( [], { status: 201, body: { id: '10100' } } );
+
+    // WHEN
+    const outcome = await handlerFor( jira.baseUrl, 'tracker-create' )( CREATE );
+
+    // THEN
+    expect( postsOf( jira ).length ).toBe( 1 );
+    expect( [ outcome.ok, outcome.result ] ).toEqual( [ false, 'Jira created the issue but answered no key' ] );
+  } );
+
+  it( 'Given a tracker-create job missing its project, work type, summary or label when it runs then it fails before Jira is called', async () => {
+    // GIVEN
+    const jira = await creatingJira( [], { status: 201, body: { id: '10100', key: 'PROJ-7' } } );
+    const without = ( field: string ) => ( { ...CREATE, payload: { ...CREATE.payload, [ field ]: '' } } );
+
+    // WHEN
+    const outcomes = await Promise.all( [ 'projectKey', 'issueTypeId', 'summary', 'label' ].map( field => handlerFor( jira.baseUrl, 'tracker-create' )( without( field ))));
+
+    // THEN
+    expect( jira.seen ).toEqual( [] );
+    expect( outcomes.map( outcome => outcome.ok )).toEqual( [ false, false, false, false ] );
   } );
 } );

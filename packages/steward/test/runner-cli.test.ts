@@ -322,7 +322,8 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
   // plugin the host serves with a design claim (METHOD_MIN_RUNNER_VERSION from @bett3r-dev/blueprint-spec). It answers
   // card threads, so it names reply (Blueprint ADR-137), explicitly: a claim naming no kinds counts as running no
   // replies, and its design claims get no agent context. Version 1.4.0 runs reply and design jobs in their agent context.
-  it( 'start --once: the claim carries the origin remoteUrl, the kinds design, reply, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold and observability-read, and Steward\'s version 1.4.0', async () => {
+  // It refreshes a repository's baseline when a merge into its default branch is reported, so it names baseline-refresh.
+  it( 'start --once: the claim carries the origin remoteUrl, the kinds design, reply, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold, observability-read and baseline-refresh, and Steward\'s version 1.4.0', async () => {
     const host = await fakeHost( () => ( { body: { job: null } } ) );
     const repo = makeRepo();
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--interval', '60', '--merge-poll', '600' ], {},
@@ -330,7 +331,7 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
     expect( claim.body ).toMatchObject( {
       remoteUrl: execSync( 'git remote get-url origin', { cwd: repo, encoding: 'utf-8' } ).trim(),
-      kinds: [ 'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read' ],
+      kinds: [ 'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read', 'baseline-refresh' ],
     } );
     expect( claim.body.runnerVersion ).toBe( '1.4.0' );
     expect( claim.body.routineAliases ).toBeUndefined();
@@ -340,14 +341,39 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
 
   // With the whole Jira credential in its environment Steward holds the tracker handlers, so its claim names the
   // kinds; the case above, with BLUEPRINT_JIRA_API_TOKEN scrubbed, pins that it does not without one. The same
-  // credential runs tracker-transition and tracker-describe.
-  it( 'start: with BLUEPRINT_JIRA_BASE_URL, _EMAIL and _API_TOKEN set, the claim\'s kinds are design, reply, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold, observability-read, tracker-poll, tracker-comment, tracker-transition and tracker-describe', async () => {
+  // credential runs tracker-transition, tracker-describe and tracker-create.
+  it( 'start: with BLUEPRINT_JIRA_BASE_URL, _EMAIL and _API_TOKEN set, the claim\'s kinds are design, reply, git-poll, drop-worktree, flush, ticket-branch, pr-ready, scaffold, observability-read, baseline-refresh, tracker-poll, tracker-comment, tracker-transition, tracker-describe and tracker-create', async () => {
     const host = await fakeHost( () => ( { body: { job: null } } ) );
     await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--interval', '60', '--merge-poll', '600' ], {
       BLUEPRINT_JIRA_BASE_URL: 'https://acme.atlassian.net', BLUEPRINT_JIRA_EMAIL: 'bot@acme.test', BLUEPRINT_JIRA_API_TOKEN: 'jira-token',
     }, { killWhen: () => host.requests.some( ( q ) => q.url === '/api/blueprint/steward/claim' ) } );
     const claim = host.requests.find( ( q ) => q.url === '/api/blueprint/steward/claim' )!;
-    expect( claim.body.kinds ).toEqual( [ 'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read', 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe' ] );
+    expect( claim.body.kinds ).toEqual( [ 'design', 'reply', 'git-poll', 'drop-worktree', 'flush', 'ticket-branch', 'pr-ready', 'scaffold', 'observability-read', 'baseline-refresh', 'tracker-poll', 'tracker-comment', 'tracker-transition', 'tracker-describe', 'tracker-create' ] );
+  } );
+
+  // Blueprint ADR-121: a merge into the default branch queues a baseline-refresh on the baseline. Steward brings the
+  // baseline's worktree to origin's tip of that branch, extracts there and pushes it to the baseline, and runs no agent.
+  // A job naming no branch is refreshed from origin's default branch.
+  it.each( [ [ 'main' ], [ null ] ] )( 'start --once: a baseline-refresh job (branch %s) pushes origin\'s merged main, extracted in the baseline\'s worktree, to the baseline, and reports done without claude', async ( jobBranch ) => {
+    const host = await fakeHost( ( req ) =>
+      req.url === '/api/blueprint/steward/claim' ? { body: { job: { id: 'jr', kind: 'baseline-refresh', sessionId: 'sess-base', branch: jobBranch, prompt: null } } } : {} );
+    const repo = makeRepo( 'mkdir -p .blueprint && if [ -f merged.txt ]; then echo \'{"nodes":["merged"]}\'; else echo \'{"nodes":[]}\'; fi > .blueprint/graph.json' );
+    // The merge lands on origin's main; the checkout's own main stays at the pre-merge commit.
+    execSync( 'git checkout -q -b merging && echo m > merged.txt && git -c user.email=t@t -c user.name=t add merged.txt && git -c user.email=t@t -c user.name=t commit -qm merged'
+      + ' && git push -q origin merging:main && git checkout -q main && git branch -q -D merging', { cwd: repo } );
+    const mergedSha = execSync( 'git rev-parse origin/main', { cwd: repo, encoding: 'utf-8' } ).trim();
+    expect( execSync( 'git rev-parse main', { cwd: repo, encoding: 'utf-8' } ).trim() ).not.toBe( mergedSha );
+    const claude = makeFakeClaude( 0 );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: claude.script } );
+    expect( r.code ).toBe( 0 );
+    const requests = unstepped( host.requests );
+    expect( requests.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/reality', '/api/blueprint/steward/jobs/jr' ] );
+    expect( requests[ 1 ].headers[ 'x-blueprint-session-id' ] ).toBe( 'sess-base' );
+    expect( requests[ 1 ].body ).toMatchObject( { branch: 'main', commitSha: mergedSha, graph: { nodes: [ 'merged' ] } } );
+    // Extracted in the baseline's worktree, at the merged tip; the --repo checkout never moved.
+    expect( [ existsSync( join( worktreeOf( repo, 'sess-base' ), 'merged.txt' ) ), existsSync( join( repo, 'merged.txt' ) ) ] ).toEqual( [ true, false ] );
+    expect( requests[ 2 ].body ).toMatchObject( { status: 'done' } );
+    expect( existsSync( claude.record ) ).toBe( false );
   } );
 
   // A fake host that binds a session to the branch of its latest reality push. A job on a session bound to feat/x
