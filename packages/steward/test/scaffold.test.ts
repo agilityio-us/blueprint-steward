@@ -108,7 +108,7 @@ for ( const node of nodes ) {
 if ( plan.during ) execSync( plan.during, { stdio: 'ignore' } );
 process.stdout.write( JSON.stringify( { files, fragments: [], appends, hosted: [], skipped, deferred: plan.deferred ?? [], dropped: [],
   held: plan.held ?? [], testPlan: { configured: true, suites: [], undecided: [] }, scenarioTests: plan.scenarioTests ?? [], unplaced: [],
-  scenariosExcluded: [], written: flags.includes( '--write' ) }, null, 2 ) + '\\n' );
+  scenariosExcluded: [], written: flags.includes( '--write' ), ...( plan.shapeOwed ? { shapeOwed: plan.shapeOwed } : {} ) }, null, 2 ) + '\\n' );
 process.exit( plan.exit ?? 0 );
 `;
 // The fake extractor: the graph holds the node of each code file in its registry (tools/extracts.json, file -> node)
@@ -121,7 +121,8 @@ writeFileSync( '.blueprint/graph.json', JSON.stringify( { nodes, edges: [] } ) +
 `;
 
 type PlannedFile = { file: string; node: string; content: string; kind?: string };
-type Plan = { exit?: number; files?: PlannedFile[]; appends?: { file: string; node: string; code: string }[]; skipped?: unknown[]; held?: unknown[]; deferred?: unknown[]; scenarioTests?: unknown[]; during?: string };
+type Plan = { exit?: number; files?: PlannedFile[]; appends?: { file: string; node: string; code: string }[]; skipped?: unknown[]; held?: unknown[]; deferred?: unknown[]; scenarioTests?: unknown[]; during?: string;
+  shapeOwed?: { node: string; artifact: string; line: string }[] };
 
 const UPDATE_HOOK = ( marker: string ) => `#!/bin/sh
 ref="$1"; old="$2"; new="$3"
@@ -391,6 +392,29 @@ describe( 'blueprint-steward scaffold job', () => {
       .toEqual( { status: 'done', outcome: 'done', committed: true, commitSha: tip, asked: [] } );
     expect( outcome.result?.stillOwed ).toContainEqual( { node: 'ui1', reason: 'no-template', detail: 'node type \'ui\' has no template' } );
     expect( reportAt( fx, tip ) ).toMatchObject( { status: 'done' } );
+  }, 120_000 );
+
+  // The scaffolder's still-owed data-shape lines reach the report and the job result as owed.
+  it( 'Given a scaffolder that reports two shapeOwed lines for a command in code, when the job runs, then stillOwed owes each as shape-not-written with the line as its detail, in the scaffolder\'s order', async () => {
+    // GIVEN
+    const fx = makeFixture();
+    const sha1 = originTip( fx );
+    const CHANGED = '`orderId` of Place Order (c1) is changed by the design (orderId is string, designed integer); the scaffold never rewrites an existing field: change it in the code\'s schema';
+    const REMOVED = '`note` of Place Order (c1) is no longer in its designed data shape; the scaffold never deletes code: remove it from the code\'s schema if it should go';
+    writePlan( fx, { ...FIRST_PLAN, shapeOwed: [ { node: 'c1', artifact: 'command', line: REMOVED }, { node: 'c1', artifact: 'command', line: CHANGED } ], deferred: [ { node: 'a1', waitsOn: [ 'c9' ] } ] } );
+
+    // WHEN
+    const outcome = await scaffoldAt( fx, sha1 );
+
+    // THEN
+    const tip = originTip( fx );
+    const owed = [
+      { node: 'a1', reason: 'deferred', detail: 'c9' },
+      { node: 'c1', reason: 'shape-not-written', detail: REMOVED },
+      { node: 'c1', reason: 'shape-not-written', detail: CHANGED },
+    ];
+    expect( { status: outcome.status, committed: outcome.result?.committed, stillOwed: outcome.result?.stillOwed } ).toEqual( { status: 'done', committed: true, stillOwed: owed } );
+    expect( reportAt( fx, tip ) ).toMatchObject( { stillOwed: owed, worklist: [] } );
   }, 120_000 );
 
   it( 'Given the scaffolder exits 1, when the job runs, then the job fails and origin\'s tip is unmoved', async () => {
