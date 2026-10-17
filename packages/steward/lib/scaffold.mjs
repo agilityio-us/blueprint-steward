@@ -12,7 +12,9 @@
 // (SCAFFOLD_EXIT_BLOCKED) commits and reports blocked; any other non-zero exit fails.
 // The files the scaffolder placed fragments into are committed too, gated on the declared designTooling.typecheck
 // (Blueprint ADR-128). Red, the tree is rebuilt with --no-place and typechecked again; placements that add an error
-// are dropped and owed placed-but-red, never held.
+// are dropped and owed placed-but-red, never held. Beside the stub deletion, each placement the prior scaffold commit
+// made (placed[] with the spans it inserted) whose spans git's diff since that commit leaves untouched is taken out
+// before re-extracting, wherever lines added or removed above it moved it; an edited one is kept and reported.
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -62,6 +64,10 @@ const reportText = ( report ) => `${ JSON.stringify( sortKeys( report ), null, 2
 /** The scaffold commit's message: its subject and the trailer naming the item. */
 export const scaffoldMessage = ( key ) => `chore(${ key }): scaffold the agreed design\n\n${ SCAFFOLD_TRAILER }: ${ key }\n`;
 const digest = async ( file ) => `sha256:${ createHash( 'sha256' ).update( await readFile( file ) ).digest( 'hex' ) }`;
+const textDigest = ( text ) => `sha256:${ createHash( 'sha256' ).update( text, 'utf-8' ).digest( 'hex' ) }`;
+// The bytes as a string when they are UTF-8, undefined otherwise: a file with a byte that is not UTF-8 is never read
+// and written back as text, which would turn the byte into U+FFFD.
+const utf8Of = ( bytes ) => { const text = bytes.toString( 'utf-8' ); return Buffer.from( text, 'utf-8' ).equals( bytes ) ? text : undefined; };
 
 // Removes `rel`'s now-empty parent directories, up to the repository root.
 const pruneDirs = async ( dir, rel ) => {
@@ -167,12 +173,129 @@ const classify = ( result, dropped = [] ) => {
 // The fragments the scaffolder placed, and whether it reports placement at all (an older scaffolder does not).
 const placedOf = ( result ) => ( result.fragments ?? [] ).filter( ( f ) => f?.placement?.status === 'placed' );
 const reportsPlacement = ( result ) => ( result.fragments ?? [] ).some( ( f ) => f?.placement !== undefined && f?.placement !== null );
-// A placed[] entry is { node, file, key }, key node|file|at.kind|declares with a missing value as "", one entry per key.
+// A placed[] entry is { node, file, key }, key node|file|at.kind|declares with a missing value as "", and (as
+// scaffold-commit.py's scaffolder_placed) the spans the placer inserted, so a later press can take them out again, with
+// `blob`, the object id of the file this commit holds, and `digest`, the sha256 of the text the placer left, which
+// those offsets index, both only when a checkout of the blob is that text (none for a file it does not commit). One
+// entry per key, this run's first, then the earlier placements a press kept, with no blob and no digest: their offsets
+// index an earlier press's file (Blueprint ADR-128).
 const keyOf = ( f ) => [ f?.node, f?.file, f?.at?.kind, f?.declares ].map( ( v ) => ( v === undefined || v === null ? '' : String( v ) ) ).join( '|' );
-const placedEntries = ( fragments ) => {
+const placedEntries = ( fragments, kept = [], bound = {} ) => {
   const entries = new Map();
-  for ( const f of fragments ) { const key = keyOf( f ); if ( !entries.has( key ) ) entries.set( key, { node: f.node, file: f.file, key } ); }
+  for ( const f of fragments ) {
+    const key = keyOf( f );
+    if ( entries.has( key ) ) continue;
+    const binding = bound[ insideRepo( f.file ) ];
+    entries.set( key, { node: f.node, file: f.file, key, inserted: Array.isArray( f.placement?.inserted ) ? f.placement.inserted : [], ...( binding === undefined ? {} : binding ) } );
+  }
+  for ( const { blob: _blob, digest: _digest, ...entry } of kept ) if ( !entries.has( entry.key ) ) entries.set( entry.key, entry );
   return byKey( [ ...entries.values() ], 'key' );
+};
+
+// Where an inserted span { offset, text } of the prior scaffold commit stands in the file now. Its offset (UTF-16 code
+// units, as JavaScript strings index) is into the file as that commit wrote it (`old`), and `hunks` are git's
+// zero-context diff from that file to this one (`text`). Answers [start, end) in `text` when no hunk touches the span
+// (none removes or changes a line it covers, and none adds lines strictly inside it) and the text at the offset it
+// moves to (its line moved by the lines the hunks above it add or remove, its column kept) is the span's text;
+// undefined otherwise, so an edited span is never cut. A pure insertion strictly inside the span is an edit too: git
+// aligns a developer's lines that repeat the span's last line as inserted inside it, where the span's text still reads
+// at its offset, and a cut there would take the scaffolder's text and reshuffle what the developer typed.
+const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
+const hunksOf = ( diff ) => [ ...diff.matchAll( HUNK ) ].map( ( m ) => ( {
+  oldStart: Number( m[ 1 ] ), oldCount: m[ 2 ] === undefined ? 1 : Number( m[ 2 ] ), newCount: m[ 4 ] === undefined ? 1 : Number( m[ 4 ] ),
+} ) );
+const lineStarts = ( text ) => [ 0, ...[ ...text.matchAll( /\n/g ) ].map( ( m ) => m.index + 1 ) ];
+const startOf = ( starts, text, line ) => ( line < starts.length ? starts[ line ] : text.length );
+const mapSpan = ( old, hunks, text, span ) => {
+  const needle = span?.text;
+  if ( typeof needle !== 'string' || needle === '' || !Number.isInteger( span.offset ) || span.offset < 0 ) return undefined;
+  const start = span.offset;
+  const end = start + needle.length;
+  const oldStarts = lineStarts( old );
+  let shift = 0;
+  for ( const { oldStart, oldCount, newCount } of hunks ) {
+    // A hunk's old lines are [oldStart, oldStart + oldCount) counted from 1; with none, its lines go in after oldStart.
+    const from = startOf( oldStarts, old, oldCount > 0 ? oldStart - 1 : oldStart );
+    const to = startOf( oldStarts, old, oldCount > 0 ? oldStart - 1 + oldCount : oldStart );
+    if ( oldCount > 0 && from < end && start < to ) return undefined;
+    if ( oldCount === 0 && from > start && from < end ) return undefined;
+    if ( to <= start ) shift += newCount - oldCount;
+  }
+  const line = oldStarts.findLastIndex( ( at ) => at <= start );
+  const at = startOf( lineStarts( text ), text, line + shift ) + ( start - oldStarts[ line ] );
+  return text.startsWith( needle, at ) ? [ at, at + needle.length ] : undefined;
+};
+const disjoint = ( spans ) => [ ...spans ].sort( ( a, b ) => a[ 0 ] - b[ 0 ] ).every( ( span, i, all ) => i === 0 || all[ i - 1 ][ 1 ] <= span[ 0 ] );
+
+// The scaffold commit that wrote the prior report, whose file a placed[] entry's offsets index when it is the entry's
+// blob: the last commit before `sha` that changed the report, when one of its parents is the report's own baseSha;
+// undefined otherwise.
+const priorScaffoldCommit = async ( git, dir, sha, reportPath, prior ) => {
+  if ( typeof prior?.baseSha !== 'string' || !SHA.test( prior.baseSha ) ) return undefined;
+  const last = await git( dir, [ 'rev-list', '-n', '1', sha, '--', reportPath ] );
+  const commit = last.status === 0 ? last.stdout.trim() : '';
+  if ( !SHA.test( commit ) ) return undefined;
+  const parents = await git( dir, [ 'rev-list', '--parents', '-n', '1', commit ] );
+  return parents.status === 0 && parents.stdout.trim().split( ' ' ).slice( 1 ).includes( prior.baseSha ) ? commit : undefined;
+};
+
+// Unplace (scaffold-commit.py unplace): from its file, every span a prior placed[] entry records as inserted, when the
+// prior scaffold commit (`commit`) holds the file the entry's `blob` names, that file read as a checkout writes it now
+// (`git cat-file --filters`) is the text whose sha256 is the entry's `digest`, every span of the entry maps from that
+// text through the diff to the worktree's file and none overlaps one already taken; otherwise the entry is edited and
+// every span of it stays. So an entry whose offsets index another text is never read: one a press kept from an earlier
+// press, one whose commit was rewritten, one with no blob or no digest, every entry when `commit` is undefined or does
+// not hold the file, and every entry of a file whose checkout the attributes or filters now write differently (a
+// .gitattributes eol=crlf added since). The diff is git's between the two texts as they are, each stored as a blob
+// with no filter (`hash-object --no-filters`) and diffed blob to blob as text, so no attribute or filter applies to
+// either side (a smudge filter that writes a header line would otherwise put the hunks one line off). An entry with no
+// spans, or whose file is gone, is left alone. A file holding a byte that is not UTF-8 is left alone whole, every entry
+// of it edited: the developer's byte survives, never rewritten as U+FFFD. Answers the entries removed, the edited ones
+// as { file, node, key }, and the files it rewrote.
+const unplace = async ( dir, git, commit, placed ) => {
+  const byFile = new Map();
+  for ( const entry of placed ) {
+    const rel = insideRepo( entry?.file );
+    if ( rel === undefined || !Array.isArray( entry.inserted ) || entry.inserted.length === 0 ) continue;
+    byFile.set( rel, [ ...( byFile.get( rel ) ?? [] ), entry ] );
+  }
+  const removed = [];
+  const edited = [];
+  const rewritten = [];
+  for ( const [ rel, entries ] of [ ...byFile ].sort( ( a, b ) => compare( a[ 0 ], b[ 0 ] ) ) ) {
+    let bytes;
+    try { bytes = await readFile( join( dir, rel ) ); } catch { continue; }
+    let text = utf8Of( bytes );
+    if ( text === undefined ) { edited.push( ...entries.map( ( entry ) => ( { file: rel, node: entry.node, key: entry.key } ) ) ); continue; }
+    let blob;
+    let old;
+    let hunks = [];
+    if ( commit !== undefined ) {
+      const held = await git( dir, [ 'rev-parse', '--verify', '--quiet', `${ commit }:${ rel }` ] );
+      const shown = held.status === 0 ? await git( dir, [ 'cat-file', '--filters', `${ commit }:${ rel }` ] ) : undefined;
+      const raw = ( input ) => git( dir, [ 'hash-object', '-w', '--no-filters', '--stdin' ], { input } );
+      const from = shown?.status === 0 ? await raw( shown.stdout ) : undefined;
+      const to = from?.status === 0 ? await raw( text ) : undefined;
+      const diffed = to?.status === 0 ? await git( dir, [ 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--unified=0', from.stdout.trim(), to.stdout.trim() ] ) : undefined;
+      if ( diffed?.status === 0 ) { blob = held.stdout.trim(); old = shown.stdout; hunks = hunksOf( diffed.stdout ); }
+    }
+    const oldDigest = old === undefined ? undefined : textDigest( old );
+    const cuts = [];
+    for ( const entry of entries ) {
+      const bound = old !== undefined && entry.blob === blob && typeof entry.digest === 'string' && entry.digest === oldDigest;
+      const spans = bound ? entry.inserted.map( ( span ) => mapSpan( old, hunks, text, span ) ) : [ undefined ];
+      if ( spans.every( ( span ) => span !== undefined ) && disjoint( [ ...cuts, ...spans ] ) ) {
+        cuts.push( ...spans );
+        removed.push( entry );
+      } else edited.push( { file: rel, node: entry.node, key: entry.key } );
+    }
+    if ( cuts.length === 0 ) continue;
+    // Last span first, so the earlier offsets stay valid.
+    for ( const [ start, end ] of cuts.sort( ( a, b ) => b[ 0 ] - a[ 0 ] ) ) text = `${ text.slice( 0, start ) }${ text.slice( end ) }`;
+    await writeFile( join( dir, rel ), text );
+    rewritten.push( rel );
+  }
+  return { removed, edited, rewritten };
 };
 
 // Blueprint ADR-015's error multiset: each error key with its count, so a second copy of a base error is new.
@@ -253,6 +376,7 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
   const priorShown = await git( dir, [ 'cat-file', 'blob', `${ sha }:${ reportPath }` ] );
   let prior = null;
   if ( priorShown.status === 0 ) { try { prior = JSON.parse( priorShown.stdout ); } catch { prior = null; } }
+  const priorCommit = prior === null ? undefined : await priorScaffoldCommit( git, dir, sha, reportPath, prior );
 
   // One scaffold of `sha`'s tree with the scaffolder's `flags` added; run a second time, with --no-place, when the
   // placements turn the declared typecheck red. Answers { failure } or what the commit would hold.
@@ -283,9 +407,15 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
         carried.push( entry );
       }
     }
-    // The graph extracted above still counts the deleted stubs as code, and the scaffolder writes nothing for a node the
-    // extracted graph already holds: extract again whenever any were deleted.
-    if ( deleted.length > 0 ) {
+    // The prior scaffold commit's placements. Untouched ones go, edited ones stay and are reported edited; every prior
+    // entry not removed stays in placed[], and a removed one is listed again only if this run places it.
+    const priorPlaced = Array.isArray( prior?.placed ) ? prior.placed : [];
+    const unplaced = await unplace( dir, git, priorCommit, priorPlaced );
+    edited.push( ...unplaced.edited );
+    const keptPlaced = priorPlaced.filter( ( entry ) => !unplaced.removed.includes( entry ) );
+    // The graph extracted above still counts the deleted stubs and the removed placements as code, and the scaffolder
+    // writes nothing for a node the extracted graph already holds: extract again whenever any were deleted or removed.
+    if ( deleted.length > 0 || unplaced.removed.length > 0 ) {
       const again = await extracted();
       if ( again !== undefined ) return { failure: again };
     }
@@ -312,6 +442,9 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
       if ( rel === undefined ) return { failure: failed( 'scaffold-output-invalid', { detail: `the scaffold command reported a fragment placed into ${ JSON.stringify( f?.file ) }, outside the repository` } ) };
       placedInto.push( rel );
     }
+    // Each file the placer placed into, as it left it in the worktree, which the offsets it reports index.
+    const placerText = new Map();
+    for ( const rel of placedInto ) if ( !placerText.has( rel ) ) placerText.set( rel, await readFile( join( dir, rel ) ).then( utf8Of, () => undefined ) );
     const createdPaths = new Set( created.map( ( c ) => c.file ) );
     const appendedNow = ( result.appends ?? [] ).filter( ( a ) => a?.kind === 'barrel' && !createdPaths.has( a.file ) );
     const stale = deleted.filter( ( d ) => !createdPaths.has( d.file ) );
@@ -326,13 +459,21 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
       kept.push( a );
     }
     const appended = byKey( [ ...appendedNow, ...kept ], 'file', 'code' );
-    const written = [ ...new Set( [ ...createdPaths, ...appendedNow.map( ( a ) => insideRepo( a.file ) ).filter( Boolean ), ...unappended, ...placedInto ] ) ].sort();
+    const written = [ ...new Set( [ ...createdPaths, ...appendedNow.map( ( a ) => insideRepo( a.file ) ).filter( Boolean ), ...unappended, ...unplaced.rewritten, ...placedInto ] ) ].sort();
     const ignored = written.filter( ( path ) => path.startsWith( `${ docsDir }/` ) );
     const committed = written.filter( ( path ) => !ignored.includes( path ) );
     // Into the object store now, so a later --no-place rebuild of the worktree does not lose them.
     const blobs = {};
     for ( const path of committed ) blobs[ path ] = await gitOut( git, dir, [ 'hash-object', '-w', '--', path ] );
-    return { ran, result, created, edited, carried, stale, appended, committed, ignored, blobs };
+    // A placed file's blob binds the placer's offsets only when a checkout of it writes the text the placer left
+    // (`cat-file --filters`); Steward taking a barrel line out of it after the placer ran is one way it does not.
+    const placedBlobs = {};
+    for ( const [ rel, text ] of placerText ) {
+      if ( blobs[ rel ] === undefined || text === undefined ) continue;
+      const stored = await git( dir, [ 'cat-file', '--filters', `--path=${ rel }`, blobs[ rel ] ] );
+      if ( stored.status === 0 && stored.stdout === text ) placedBlobs[ rel ] = { blob: blobs[ rel ], digest: textDigest( text ) };
+    }
+    return { ran, result, created, edited, carried, keptPlaced, stale, appended, committed, ignored, blobs, placedBlobs };
   };
 
   let scaffolded = await scaffoldTree( [] );
@@ -371,7 +512,7 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
       }
     }
   }
-  const { ran, result, created, edited, carried, stale, appended, committed, ignored, blobs } = scaffolded;
+  const { ran, result, created, edited, carried, keptPlaced, stale, appended, committed, ignored, blobs, placedBlobs } = scaffolded;
 
   // Owed from the placing run's fragments (the --no-place run's carry no placement), the dropped ones placed-but-red.
   const { asked, owed, worklist } = classify( { ...result, fragments: gated.fragments }, dropped );
@@ -382,7 +523,7 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
     inputs: { maps: [ { file: mapPath, digest: await digest( join( dir, mapPath ) ) } ], design: await digest( join( dir, designPath ) ), graph: await digest( join( dir, '.blueprint', 'graph.json' ) ).catch( () => null ) },
     created: byKey( created, 'file' ), appended,
     manifest: byKey( [ ...created.filter( ( c ) => blobs[ c.file ] !== undefined ).map( ( c ) => ( { file: c.file, node: c.node, blob: blobs[ c.file ] } ) ), ...carried ], 'file' ),
-    worklist, placed: placedEntries( placedOf( result ) ), held: result.held ?? [], asked, stillOwed: owed, stale: byKey( stale, 'file' ), edited: byKey( edited, 'file' ),
+    worklist, placed: placedEntries( placedOf( result ), keptPlaced, placedBlobs ), held: result.held ?? [], asked, stillOwed: owed, stale: byKey( stale, 'file' ), edited: byKey( edited, 'file' ),
     observe: null, typecheck,
     scenarioTests: result.scenarioTests ?? [], unplaced: result.unplaced ?? [], scenariosExcluded: result.scenariosExcluded ?? [],
     scaffolder: result,
