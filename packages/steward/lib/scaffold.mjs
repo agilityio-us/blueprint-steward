@@ -6,10 +6,13 @@
 // by plumbing on that sha, fast-forward only. Every run that reaches the commit makes one, under the trailer
 // `Blueprint-Scaffold: <KEY>`, so the latest such commit on the branch is the scaffold in force: one with nothing to
 // write commits scaffold.json alone, and a repository that declares no scaffold command commits a scaffold.json whose
-// status is skipped. No model runs and no test runs: this module starts git and the declared
-// scaffold command, and calls the `extract` it is handed (Steward's extractIn, which runs the declared extract
+// status is skipped. No model runs and no test runs: this module starts git, the declared scaffold command and the
+// declared typecheck, and calls the `extract` it is handed (Steward's extractIn, which runs the declared extract
 // command and, when that fails in a worktree with no node_modules, one install without build scripts). Exit 3
 // (SCAFFOLD_EXIT_BLOCKED) commits and reports blocked; any other non-zero exit fails.
+// The files the scaffolder placed fragments into are committed too, gated on the declared designTooling.typecheck
+// (Blueprint ADR-128). Red, the tree is rebuilt with --no-place and typechecked again; placements that add an error
+// are dropped and owed placed-but-red, never held.
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -27,8 +30,13 @@ const EXIT_BLOCKED = SCAFFOLD_EXIT_BLOCKED;
 /** How much of a failed scaffolder's stderr the report carries: its tail. */
 const STDERR_TAIL = 2048;
 const CONFIG = BLUEPRINT_CONFIG_FILE;
-// The fragment artifacts the report lists as topology: a worklist entry, owed as not-placed.
+// The fragment artifacts the report lists as topology: the worklist holds those left owed, owed as not-placed.
 const TOPOLOGY = [ 'command', 'event', 'invariant' ];
+// Blueprint ADR-015's error key: an `error TS<n>` line with its location set aside, so a base error the placements only
+// moved down the file is not new (scaffold-commit.py ANSI, TS_ERROR, LOCATION).
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+const TS_ERROR = /\berror\s+TS\d+\b/;
+const LOCATION = /\(\d+,\d+\)|:\d+:\d+/g;
 const SHA = /^[0-9a-f]{40}$/;
 
 const failed = ( error, detail, reason ) => ( { ok: false, ...( reason ? { reason } : {} ), result: JSON.stringify( { error, ...detail } ) } );
@@ -131,9 +139,12 @@ const scaffoldCommitOf = async ( git, dir, tip, sha, reportPath ) => {
 };
 
 // Classify the scaffolder's --json report: a blocked unit whose every decision is no-template is still owed, any other
-// is asked; a scenario test on a decision is asked; a topology fragment is owed not-placed and on the worklist, any
-// other fragment owed as registration; a deferred unit is owed deferred.
-const classify = ( result ) => {
+// is asked; a scenario test on a decision is asked; a topology fragment the scaffolder did not place is owed not-placed
+// and on the worklist, any other unplaced fragment owed as registration; a deferred unit is owed deferred. A fragment is
+// owed when its placement is owed or absent (a scaffolder that does not place); a placed or present one is not.
+// `dropped`: fragments placed in a tree the typecheck rejected, owed placed-but-red.
+const isOwed = ( f ) => ( f?.placement?.status ?? 'owed' ) === 'owed';
+const classify = ( result, dropped = [] ) => {
   const asked = [];
   const owed = [];
   for ( const s of result.skipped ?? [] ) {
@@ -146,11 +157,39 @@ const classify = ( result ) => {
     if ( t?.outcome === 'decision' ) asked.push( { node: t.scenarioId, question: 'scenario test placement needs a decision' } );
   }
   const isTopology = ( f ) => TOPOLOGY.includes( f?.artifact ) && !String( f?.file ?? '' ).startsWith( 'unplaced:' );
-  const worklist = byKey( ( result.fragments ?? [] ).filter( isTopology ), 'node', 'file' );
-  for ( const f of result.fragments ?? [] ) owed.push( { node: f?.node, reason: isTopology( f ) ? 'not-placed' : 'registration', detail: f?.file } );
+  const worklist = byKey( ( result.fragments ?? [] ).filter( ( f ) => isTopology( f ) && isOwed( f ) ), 'node', 'file' );
+  for ( const f of ( result.fragments ?? [] ).filter( isOwed ) ) owed.push( { node: f?.node, reason: isTopology( f ) ? 'not-placed' : 'registration', detail: f?.file } );
+  for ( const f of dropped ) owed.push( { node: f?.node, reason: 'placed-but-red', detail: f?.file } );
   for ( const d of result.deferred ?? [] ) owed.push( { node: d?.node, reason: 'deferred', detail: ( d?.waitsOn ?? [] ).join( ', ' ) } );
   return { asked, owed: byKey( owed, 'node', 'reason' ), worklist };
 };
+
+// The fragments the scaffolder placed, and whether it reports placement at all (an older scaffolder does not).
+const placedOf = ( result ) => ( result.fragments ?? [] ).filter( ( f ) => f?.placement?.status === 'placed' );
+const reportsPlacement = ( result ) => ( result.fragments ?? [] ).some( ( f ) => f?.placement !== undefined && f?.placement !== null );
+// A placed[] entry is { node, file, key }, key node|file|at.kind|declares with a missing value as "", one entry per key.
+const keyOf = ( f ) => [ f?.node, f?.file, f?.at?.kind, f?.declares ].map( ( v ) => ( v === undefined || v === null ? '' : String( v ) ) ).join( '|' );
+const placedEntries = ( fragments ) => {
+  const entries = new Map();
+  for ( const f of fragments ) { const key = keyOf( f ); if ( !entries.has( key ) ) entries.set( key, { node: f.node, file: f.file, key } ); }
+  return byKey( [ ...entries.values() ], 'key' );
+};
+
+// Blueprint ADR-015's error multiset: each error key with its count, so a second copy of a base error is new.
+const errorsOf = ( ran ) => {
+  const keys = new Map();
+  for ( const raw of `${ ran.stdout ?? '' }\n${ ran.stderr ?? '' }`.split( /\r?\n/ ) ) {
+    const line = raw.replace( ANSI, '' );
+    const found = TS_ERROR.exec( line );
+    if ( found === null ) continue;
+    const key = `${ line.slice( 0, found.index ).replace( LOCATION, '' ) }${ line.slice( found.index ) }`.split( /\s+/ ).filter( Boolean ).join( ' ' );
+    keys.set( key, ( keys.get( key ) ?? 0 ) + 1 );
+  }
+  return keys;
+};
+// The error keys `after` holds more often than `before`, once per extra copy, sorted.
+const newErrorsOf = ( after, before ) =>
+  [ ...after ].flatMap( ( [ key, count ] ) => Array( Math.max( 0, count - ( before.get( key ) ?? 0 ) ) ).fill( key ) ).sort();
 
 /**
  * Runs one scaffold job in `dir` (the session's worktree) for `payload` { sha, key, design?, map? } on origin's
@@ -206,83 +245,136 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
   const mapPath = insideRepo( payload.map ?? `${ at.path }/map.json` );
   if ( designPath === undefined || mapPath === undefined ) return failed( 'payload-invalid', { detail: 'the design or map path is not inside the repository' } );
 
-  // The tree as `sha` has it, with no file a prior job left behind (ignored files, node_modules, stay).
-  const moved = await git( dir, [ 'checkout', '--quiet', '--force', '--detach', sha ] );
-  if ( moved.status !== 0 ) return failed( 'checkout-failed', { detail: `git checkout ${ sha } failed: ${ gitFailure( moved ) }` }, 'checkout-failed' );
-  const cleaned = await git( dir, [ 'clean', '-fd' ] );
-  if ( cleaned.status !== 0 ) return failed( 'checkout-failed', { detail: `git clean -fd failed: ${ gitFailure( cleaned ) }` }, 'checkout-failed' );
   const extractCommand = typeof tooling.extract === 'string' && tooling.extract.trim() !== '' ? tooling.extract : undefined;
   const extracted = async () => {
     if ( extractCommand === undefined ) return undefined;
     try { await extract( dir, extractCommand ); return undefined; } catch ( err ) { return failed( 'extract-failed', { detail: err.message } ); }
   };
-  const firstExtract = await extracted();
-  if ( firstExtract !== undefined ) return firstExtract;
-
-  // The stubs of the prior scaffold commit. Untouched (blob-identical to the manifest) ones go, edited ones stay.
   const priorShown = await git( dir, [ 'cat-file', 'blob', `${ sha }:${ reportPath }` ] );
   let prior = null;
   if ( priorShown.status === 0 ) { try { prior = JSON.parse( priorShown.stdout ); } catch { prior = null; } }
-  const deleted = [];
-  const edited = [];
-  const carried = [];
-  for ( const entry of Array.isArray( prior?.manifest ) ? prior.manifest : [] ) {
-    const rel = insideRepo( entry?.file );
-    if ( rel === undefined ) continue;
-    const hashed = await git( dir, [ 'hash-object', '--', rel ] );
-    if ( hashed.status !== 0 ) continue;
-    if ( hashed.stdout.trim() === entry.blob ) {
-      await rm( join( dir, rel ), { force: true } );
-      await pruneDirs( dir, rel );
-      deleted.push( { file: rel, node: entry.node } );
-    } else {
-      edited.push( { file: rel, node: entry.node } );
-      carried.push( entry );
+
+  // One scaffold of `sha`'s tree with the scaffolder's `flags` added; run a second time, with --no-place, when the
+  // placements turn the declared typecheck red. Answers { failure } or what the commit would hold.
+  const scaffoldTree = async ( flags ) => {
+    // The tree as `sha` has it, with no file a prior job left behind (ignored files, node_modules, stay).
+    const moved = await git( dir, [ 'checkout', '--quiet', '--force', '--detach', sha ] );
+    if ( moved.status !== 0 ) return { failure: failed( 'checkout-failed', { detail: `git checkout ${ sha } failed: ${ gitFailure( moved ) }` }, 'checkout-failed' ) };
+    const cleaned = await git( dir, [ 'clean', '-fd' ] );
+    if ( cleaned.status !== 0 ) return { failure: failed( 'checkout-failed', { detail: `git clean -fd failed: ${ gitFailure( cleaned ) }` }, 'checkout-failed' ) };
+    const firstExtract = await extracted();
+    if ( firstExtract !== undefined ) return { failure: firstExtract };
+
+    // The stubs of the prior scaffold commit. Untouched (blob-identical to the manifest) ones go, edited ones stay.
+    const deleted = [];
+    const edited = [];
+    const carried = [];
+    for ( const entry of Array.isArray( prior?.manifest ) ? prior.manifest : [] ) {
+      const rel = insideRepo( entry?.file );
+      if ( rel === undefined ) continue;
+      const hashed = await git( dir, [ 'hash-object', '--', rel ] );
+      if ( hashed.status !== 0 ) continue;
+      if ( hashed.stdout.trim() === entry.blob ) {
+        await rm( join( dir, rel ), { force: true } );
+        await pruneDirs( dir, rel );
+        deleted.push( { file: rel, node: entry.node } );
+      } else {
+        edited.push( { file: rel, node: entry.node } );
+        carried.push( entry );
+      }
+    }
+    // The graph extracted above still counts the deleted stubs as code, and the scaffolder writes nothing for a node the
+    // extracted graph already holds: extract again whenever any were deleted.
+    if ( deleted.length > 0 ) {
+      const again = await extracted();
+      if ( again !== undefined ) return { failure: again };
+    }
+
+    // The declared command with the bundle's design and map, so agreed scenarios become it.todo tests.
+    const ran = await runChild( 'sh', [ '-c', `${ command } "$@"`, 'sh', '--write', '--json', '--design', designPath, '--map', mapPath, ...flags ], { cwd: dir } );
+    if ( ran.status !== EXIT_OK && ran.status !== EXIT_BLOCKED ) {
+      return { failure: failed( 'scaffold-failed', { exitCode: ran.status, timedOut: ran.timedOut === true, stderr: ( ran.stderr || ran.error?.message || '' ).slice( -STDERR_TAIL ) } ) };
+    }
+    const result = parseReport( ran.stdout );
+    if ( result === undefined ) return { failure: failed( 'scaffold-output-invalid', { exitCode: ran.status, detail: 'the scaffold command printed no JSON report' } ) };
+
+    // What the commit holds: files[].file, appends[].file and the files fragments were placed into, never a file under
+    // the bundle's <root>/<KEY>/ folder.
+    const created = [];
+    for ( const f of result.files ?? [] ) {
+      const rel = insideRepo( f?.file );
+      if ( rel === undefined ) return { failure: failed( 'scaffold-output-invalid', { detail: `the scaffold command reported the file ${ JSON.stringify( f?.file ) }, outside the repository` } ) };
+      created.push( { file: rel, node: f.node } );
+    }
+    const placedInto = [];
+    for ( const f of placedOf( result ) ) {
+      const rel = insideRepo( f?.file );
+      if ( rel === undefined ) return { failure: failed( 'scaffold-output-invalid', { detail: `the scaffold command reported a fragment placed into ${ JSON.stringify( f?.file ) }, outside the repository` } ) };
+      placedInto.push( rel );
+    }
+    const createdPaths = new Set( created.map( ( c ) => c.file ) );
+    const appendedNow = ( result.appends ?? [] ).filter( ( a ) => a?.kind === 'barrel' && !createdPaths.has( a.file ) );
+    const stale = deleted.filter( ( d ) => !createdPaths.has( d.file ) );
+    const priorAppended = ( Array.isArray( prior?.appended ) ? prior.appended : [] ).filter( ( a ) => a?.kind === 'barrel' && insideRepo( a.file ) !== undefined );
+    const unappended = await unappend( dir, stale, priorAppended, result );
+    // A barrel line the prior report recorded and this run neither removed nor appends again (the scaffolder reports a
+    // line only where its barrel lacks it) is still the scaffold's: it stays recorded, so a later rename can remove it.
+    const now = new Set( appendedNow.map( ( a ) => `${ a.file }\n${ a.code }` ) );
+    const kept = [];
+    for ( const a of priorAppended ) {
+      if ( now.has( `${ a.file }\n${ a.code }` ) || !await hasLine( join( dir, a.file ), a.code ) ) continue;
+      kept.push( a );
+    }
+    const appended = byKey( [ ...appendedNow, ...kept ], 'file', 'code' );
+    const written = [ ...new Set( [ ...createdPaths, ...appendedNow.map( ( a ) => insideRepo( a.file ) ).filter( Boolean ), ...unappended, ...placedInto ] ) ].sort();
+    const ignored = written.filter( ( path ) => path.startsWith( `${ docsDir }/` ) );
+    const committed = written.filter( ( path ) => !ignored.includes( path ) );
+    // Into the object store now, so a later --no-place rebuild of the worktree does not lose them.
+    const blobs = {};
+    for ( const path of committed ) blobs[ path ] = await gitOut( git, dir, [ 'hash-object', '-w', '--', path ] );
+    return { ran, result, created, edited, carried, stale, appended, committed, ignored, blobs };
+  };
+
+  let scaffolded = await scaffoldTree( [] );
+  if ( scaffolded.failure !== undefined ) return scaffolded.failure;
+  // The declared typecheck gates the placements. An older scaffolder's report carries no placement field: nothing was
+  // placed, the report stays as it was (typecheck null), and it is never handed --no-place (an unknown argument).
+  const typecheckCommand = typeof tooling.typecheck === 'string' && tooling.typecheck.trim() !== '' ? tooling.typecheck : undefined;
+  const gated = scaffolded.result;
+  let typecheck = null;
+  let dropped = [];
+  if ( reportsPlacement( gated ) ) {
+    const verdict = ( status, newErrors = [] ) => ( { command: typecheckCommand ?? null, status, newErrors } );
+    if ( typecheckCommand === undefined ) typecheck = verdict( 'undeclared' );
+    else {
+      const placing = await runChild( 'sh', [ '-c', typecheckCommand ], { cwd: dir } );
+      if ( placing.status === 0 ) typecheck = verdict( 'green' );
+      // Red with nothing placed: the tree without placements is this tree.
+      else if ( placedOf( gated ).length === 0 ) typecheck = verdict( 'red-base' );
+      else {
+        // Red: rebuild from a clean checkout with --no-place, typecheck that, and compare error sets (Blueprint ADR-015,
+        // as scaffold-commit.py judge_red). Kept only when the base exits non-zero too, both runs print an error line
+        // and every error now is one the base had. A base that exits 0 (whatever it prints) is not red, and a red run
+        // with no error line to read is fail-safe: the placements are dropped. newErrors is the multiset difference.
+        const rebuilt = await scaffoldTree( [ '--no-place' ] );
+        if ( rebuilt.failure !== undefined ) return rebuilt.failure;
+        const base = await runChild( 'sh', [ '-c', typecheckCommand ], { cwd: dir } );
+        const after = errorsOf( placing );
+        const before = errorsOf( base );
+        const newErrors = newErrorsOf( after, before );
+        if ( base.status !== 0 && after.size > 0 && before.size > 0 && newErrors.length === 0 ) typecheck = verdict( 'red-base' );
+        else {
+          typecheck = verdict( 'dropped', newErrors );
+          dropped = placedOf( gated );
+          scaffolded = rebuilt;
+        }
+      }
     }
   }
-  // The graph extracted above still counts the deleted stubs as code, and the scaffolder writes nothing for a node the
-  // extracted graph already holds: extract again whenever any were deleted.
-  if ( deleted.length > 0 ) {
-    const again = await extracted();
-    if ( again !== undefined ) return again;
-  }
+  const { ran, result, created, edited, carried, stale, appended, committed, ignored, blobs } = scaffolded;
 
-  // The declared command with the bundle's design and map, so agreed scenarios become it.todo tests.
-  const ran = await runChild( 'sh', [ '-c', `${ command } "$@"`, 'sh', '--write', '--json', '--design', designPath, '--map', mapPath ], { cwd: dir } );
-  if ( ran.status !== EXIT_OK && ran.status !== EXIT_BLOCKED ) {
-    return failed( 'scaffold-failed', { exitCode: ran.status, timedOut: ran.timedOut === true, stderr: ( ran.stderr || ran.error?.message || '' ).slice( -STDERR_TAIL ) } );
-  }
-  const result = parseReport( ran.stdout );
-  if ( result === undefined ) return failed( 'scaffold-output-invalid', { exitCode: ran.status, detail: 'the scaffold command printed no JSON report' } );
-
-  // What the commit holds: files[].file and appends[].file, never a file under the bundle's <root>/<KEY>/ folder.
-  const created = [];
-  for ( const f of result.files ?? [] ) {
-    const rel = insideRepo( f?.file );
-    if ( rel === undefined ) return failed( 'scaffold-output-invalid', { detail: `the scaffold command reported the file ${ JSON.stringify( f?.file ) }, outside the repository` } );
-    created.push( { file: rel, node: f.node } );
-  }
-  const createdPaths = new Set( created.map( ( c ) => c.file ) );
-  const appendedNow = ( result.appends ?? [] ).filter( ( a ) => a?.kind === 'barrel' && !createdPaths.has( a.file ) );
-  const stale = deleted.filter( ( d ) => !createdPaths.has( d.file ) );
-  const priorAppended = ( Array.isArray( prior?.appended ) ? prior.appended : [] ).filter( ( a ) => a?.kind === 'barrel' && insideRepo( a.file ) !== undefined );
-  const unappended = await unappend( dir, stale, priorAppended, result );
-  // A barrel line the prior report recorded and this run neither removed nor appends again (the scaffolder reports a
-  // line only where its barrel lacks it) is still the scaffold's: it stays recorded, so a later rename can remove it.
-  const now = new Set( appendedNow.map( ( a ) => `${ a.file }\n${ a.code }` ) );
-  const kept = [];
-  for ( const a of priorAppended ) {
-    if ( now.has( `${ a.file }\n${ a.code }` ) || !await hasLine( join( dir, a.file ), a.code ) ) continue;
-    kept.push( a );
-  }
-  const appended = byKey( [ ...appendedNow, ...kept ], 'file', 'code' );
-  const written = [ ...new Set( [ ...createdPaths, ...appendedNow.map( ( a ) => insideRepo( a.file ) ).filter( Boolean ), ...unappended ] ) ].sort();
-  const ignored = written.filter( ( path ) => path.startsWith( `${ docsDir }/` ) );
-  const committed = written.filter( ( path ) => !ignored.includes( path ) );
-
-  const blobs = {};
-  for ( const path of committed ) blobs[ path ] = await gitOut( git, dir, [ 'hash-object', '-w', '--', path ] );
-  const { asked, owed, worklist } = classify( result );
+  // Owed from the placing run's fragments (the --no-place run's carry no placement), the dropped ones placed-but-red.
+  const { asked, owed, worklist } = classify( { ...result, fragments: gated.fragments }, dropped );
   // cli.ts exits 3 for a no-template unit too, but that one is still owed, not a question: only what classify asks blocks.
   const outcome = ran.status === EXIT_BLOCKED && asked.length > 0 ? 'blocked' : 'done';
   const report = {
@@ -290,8 +382,8 @@ export const runScaffoldJob = async ( { dir, branch, payload = {}, git, extract 
     inputs: { maps: [ { file: mapPath, digest: await digest( join( dir, mapPath ) ) } ], design: await digest( join( dir, designPath ) ), graph: await digest( join( dir, '.blueprint', 'graph.json' ) ).catch( () => null ) },
     created: byKey( created, 'file' ), appended,
     manifest: byKey( [ ...created.filter( ( c ) => blobs[ c.file ] !== undefined ).map( ( c ) => ( { file: c.file, node: c.node, blob: blobs[ c.file ] } ) ), ...carried ], 'file' ),
-    worklist, placed: [], held: result.held ?? [], asked, stillOwed: owed, stale: byKey( stale, 'file' ), edited: byKey( edited, 'file' ),
-    observe: null, typecheck: null,
+    worklist, placed: placedEntries( placedOf( result ) ), held: result.held ?? [], asked, stillOwed: owed, stale: byKey( stale, 'file' ), edited: byKey( edited, 'file' ),
+    observe: null, typecheck,
     scenarioTests: result.scenarioTests ?? [], unplaced: result.unplaced ?? [], scenariosExcluded: result.scenariosExcluded ?? [],
     scaffolder: result,
   };

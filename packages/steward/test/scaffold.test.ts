@@ -1,4 +1,5 @@
 import { execSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -32,6 +33,10 @@ const PLACED = 'src/orders/OrderPlaced.event.ts';
 const SUBMITTED = 'src/orders/OrderSubmitted.event.ts';
 const PLACED_TEST = 'src/orders/__tests__/OrderPlaced.event.test.ts';
 const BARREL = 'src/orders/index.ts';
+// An existing file the placer inserts into, and a registration fragment's file.
+const AGGREGATE = 'src/orders/Orders.aggregate.ts';
+const AGGREGATE_CODE = 'export const Orders = {\n  PlaceOrder: 1,\n};\n';
+const SERVER = 'src/server.ts';
 // The extractor's registry: the code files it reads as design nodes. The renamed event keeps the design's node id, so
 // OrderPlaced.event.ts on disk still reads as e1 (the node a rename re-labels).
 const EXTRACTS: Record<string, string> = { [ PLACED ]: 'e1', [ SUBMITTED ]: 'e1' };
@@ -72,8 +77,10 @@ const fixtureHost = async ( job: Job ) => {
 // extracted graph and the named design and map, and plans by node: a node the extracted graph holds is satisfied and
 // gets nothing; a node with any planned file already on disk is skipped `exists`,
 // never rewritten; any other node gets its files (`wx`) and each barrel line its barrel lacks, which is all the report
-// lists as appended. It runs the plan's `during` shell command, if any, then prints the --json
-// report and exits as told.
+// lists as appended. Unless run with --no-place, it then places as the scaffolder's placer does: appends each of the
+// plan's `edits` to its existing file and reports the plan's fragments with their `placement`; with --no-place it
+// edits nothing and reports the fragments without one. It runs the plan's `during` shell command, if any, then prints
+// the --json report and exits as told (with --no-place, as `noPlaceExit` tells, when the plan names it).
 const FAKE_SCAFFOLDER = `import { execSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -105,11 +112,14 @@ for ( const node of nodes ) {
     appends.push( { kind: 'barrel', ...a } );
   }
 }
+const place = !flags.includes( '--no-place' );
+if ( place ) for ( const e of plan.edits ?? [] ) appendFileSync( e.file, e.code );
+const fragments = ( plan.fragments ?? [] ).map( ( { placement, ...rest } ) => ( place && placement ? { ...rest, placement } : rest ) );
 if ( plan.during ) execSync( plan.during, { stdio: 'ignore' } );
-process.stdout.write( JSON.stringify( { files, fragments: [], appends, hosted: [], skipped, deferred: plan.deferred ?? [], dropped: [],
+process.stdout.write( JSON.stringify( { files, fragments, appends, hosted: [], skipped, deferred: plan.deferred ?? [], dropped: [],
   held: plan.held ?? [], testPlan: { configured: true, suites: [], undecided: [] }, scenarioTests: plan.scenarioTests ?? [], unplaced: [],
   scenariosExcluded: [], written: flags.includes( '--write' ) }, null, 2 ) + '\\n' );
-process.exit( plan.exit ?? 0 );
+process.exit( !place && plan.noPlaceExit !== undefined ? plan.noPlaceExit : plan.exit ?? 0 );
 `;
 // The fake extractor: the graph holds the node of each code file in its registry (tools/extracts.json, file -> node)
 // that is on disk now. A test file is no node, as the extractor reads code, not tests.
@@ -120,8 +130,25 @@ mkdirSync( '.blueprint', { recursive: true } );
 writeFileSync( '.blueprint/graph.json', JSON.stringify( { nodes, edges: [] } ) + '\\n' );
 `;
 
+// The fake typecheck (designTooling.typecheck): logs each run, prints each of the plan's `typecheck` lines whose `when`
+// file holds its text (and whose `unless` file does not), and exits 2 when it printed any, as tsc does; with the plan's
+// `exitIf`, it exits 2 when that file holds its text and 0 otherwise, whatever it printed (a chained command's exit).
+const FAKE_TYPECHECK = `import { appendFileSync, readFileSync } from 'node:fs';
+const planPath = process.argv[ 2 ];
+appendFileSync( planPath + '.typecheck.log', 'ran\\n' );
+const holds = ( rule ) => readFileSync( rule.file, 'utf-8' ).includes( rule.includes );
+const plan = JSON.parse( readFileSync( planPath, 'utf-8' ) );
+const lines = ( plan.typecheck ?? [] ).filter( ( r ) => ( !r.when || holds( r.when ) ) && ( !r.unless || !holds( r.unless ) ) ).map( ( r ) => r.line );
+for ( const line of lines ) process.stdout.write( line + '\\n' );
+process.exit( ( plan.exitIf ? holds( plan.exitIf ) : lines.length > 0 ) ? 2 : 0 );
+`;
+
 type PlannedFile = { file: string; node: string; content: string; kind?: string };
-type Plan = { exit?: number; files?: PlannedFile[]; appends?: { file: string; node: string; code: string }[]; skipped?: unknown[]; held?: unknown[]; deferred?: unknown[]; scenarioTests?: unknown[]; during?: string };
+type Holds = { file: string; includes: string };
+type Plan = {
+  exit?: number; files?: PlannedFile[]; appends?: { file: string; node: string; code: string }[]; skipped?: unknown[]; held?: unknown[]; deferred?: unknown[]; scenarioTests?: unknown[]; during?: string;
+  noPlaceExit?: number; fragments?: Record<string, unknown>[]; edits?: { file: string; code: string }[]; typecheck?: { line: string; when?: Holds; unless?: Holds }[]; exitIf?: Holds;
+};
 
 const UPDATE_HOOK = ( marker: string ) => `#!/bin/sh
 ref="$1"; old="$2"; new="$3"
@@ -136,13 +163,14 @@ type Fixture = { root: string; origin: string; repo: string; dev: string; worktr
 
 const designJson = ( label: string ) => `${ JSON.stringify( { schemaVersion: 1, propose: { nodes: [ { id: 'e1', type: 'event', label } ], edges: [] } }, null, 2 ) }\n`;
 
-const makeFixture = ( { scaffold = true }: { scaffold?: boolean } = {} ): Fixture => {
+const makeFixture = ( { scaffold = true, typecheck = false }: { scaffold?: boolean; typecheck?: boolean } = {} ): Fixture => {
   const root = mkdtempSync( join( tmpdir(), 'blueprint-scaffold-' ) );
   const tools = join( root, 'tools' );
   mkdirSync( tools );
   writeFileSync( join( tools, 'scaffold.mjs' ), FAKE_SCAFFOLDER );
   writeFileSync( join( tools, 'extracts.json' ), JSON.stringify( EXTRACTS ) );
   writeFileSync( join( tools, 'extract.mjs' ), FAKE_EXTRACT( join( tools, 'extracts.json' ) ) );
+  writeFileSync( join( tools, 'typecheck.mjs' ), FAKE_TYPECHECK );
   const plan = join( root, 'plan.json' );
   const origin = join( root, 'origin.git' );
   sh( root, `git init -q --bare -b main ${ origin }` );
@@ -154,11 +182,13 @@ const makeFixture = ( { scaffold = true }: { scaffold?: boolean } = {} ): Fixtur
   const designTooling = {
     extract: `node ${ join( tools, 'extract.mjs' ) }`,
     ...( scaffold ? { scaffold: `node ${ join( tools, 'scaffold.mjs' ) } ${ plan }` } : {} ),
+    ...( typecheck ? { typecheck: typecheckCommand( root ) } : {} ),
   };
   writeFileSync( join( dev, '.blueprint.config.json' ), `${ JSON.stringify( { designTooling }, null, 2 ) }\n` );
   writeFileSync( join( dev, '.gitignore' ), '.blueprint/\n' );
   mkdirSync( join( dev, 'src', 'orders' ), { recursive: true } );
   writeFileSync( join( dev, BARREL ), 'export {};\n' );
+  writeFileSync( join( dev, AGGREGATE ), AGGREGATE_CODE );
   sh( dev, `git symbolic-ref HEAD refs/heads/main && git add -A && git ${ IDENTITY } commit -qm init && git push -q origin main` );
   // The base commit: the bundle and the two docs.
   sh( dev, `git checkout -q -b ${ BRANCH }` );
@@ -176,6 +206,8 @@ const makeFixture = ( { scaffold = true }: { scaffold?: boolean } = {} ): Fixtur
   return { root, origin, repo, dev, worktree, plan, forceMarker };
 };
 
+const typecheckCommand = ( root: string ): string => `node ${ join( root, 'tools', 'typecheck.mjs' ) } ${ join( root, 'plan.json' ) }`;
+const typecheckRuns = ( fx: Fixture ): number => existsSync( `${ fx.plan }.typecheck.log` ) ? readFileSync( `${ fx.plan }.typecheck.log`, 'utf-8' ).trim().split( '\n' ).length : 0;
 const writePlan = ( fx: Fixture, plan: Plan ) => writeFileSync( fx.plan, JSON.stringify( plan ) );
 const argvLog = ( fx: Fixture ): string[][] => existsSync( `${ fx.plan }.argv.log` )
   ? readFileSync( `${ fx.plan }.argv.log`, 'utf-8' ).trim().split( '\n' ).map( ( line ) => JSON.parse( line ) as string[] )
@@ -539,4 +571,248 @@ describe( 'blueprint-steward scaffold job', () => {
     expect( { status: outcome.status, outcome: outcome.result?.outcome, commitSha: outcome.result?.commitSha, resumed: outcome.result?.resumed } )
       .toEqual( { status: 'done', outcome: 'done', commitSha: landed, resumed: true } );
   }, 120_000 );
+
+  // The scaffolder places fragments into existing files; the job commits what it placed, lists it in placed[], owes
+  // only what is still owed, and gates the placements on the declared typecheck (Blueprint ADR-128).
+  describe( 'placements', () => {
+    const DISMISS = 'export const DismissOrder = 2;\n';
+    const GUARD = 'export const guardDismiss = Orders.PlaceOrder;\n';
+    const fragment = ( node: string, artifact: string, file: string, extra: Record<string, unknown> = {} ) =>
+      ( { file, anchor: `the ${ node } anchor`, imports: [], code: `// ${ node }`, todo: [], node, artifact, ...extra } );
+    // i1 and c1 placed (i1 declares nothing: its key ends in an empty declares; listed first, while placed[] is
+    // sorted by key), e2 already present, c3 owed with no anchor found, r1 a registration owed no-anchor.
+    const PLACING_FRAGMENTS = [
+      fragment( 'i1', 'invariant', AGGREGATE, { at: { kind: 'top-level' }, placement: { status: 'placed', inserted: [ { offset: AGGREGATE_CODE.length + DISMISS.length, text: GUARD } ] } } ),
+      fragment( 'c1', 'command', AGGREGATE, { at: { kind: 'top-level' }, declares: 'DismissOrder', placement: { status: 'placed', inserted: [ { offset: AGGREGATE_CODE.length, text: DISMISS } ] } } ),
+      fragment( 'e2', 'event', AGGREGATE, { at: { kind: 'top-level' }, declares: 'Orders', placement: { status: 'present' } } ),
+      fragment( 'c3', 'command', AGGREGATE, { at: { kind: 'object-property', container: { variable: 'Missing' } }, declares: 'ShipOrder', placement: { status: 'owed', reason: 'anchor-not-found' } } ),
+      fragment( 'r1', 'registration', SERVER, { placement: { status: 'owed', reason: 'no-anchor' } } ),
+    ];
+    const PLACING_PLAN: Plan = { ...FIRST_PLAN, fragments: PLACING_FRAGMENTS, edits: [ { file: AGGREGATE, code: DISMISS }, { file: AGGREGATE, code: GUARD } ] };
+    const PLACED_AGGREGATE = `${ AGGREGATE_CODE }${ DISMISS }${ GUARD }`;
+    const PLACED_ENTRIES = [
+      { node: 'c1', file: AGGREGATE, key: `c1|${ AGGREGATE }|top-level|DismissOrder` },
+      { node: 'i1', file: AGGREGATE, key: `i1|${ AGGREGATE }|top-level|` },
+    ];
+    const STILL_OWED = [ { node: 'c3', reason: 'not-placed', detail: AGGREGATE }, { node: 'r1', reason: 'registration', detail: SERVER } ];
+    // A tsc error the placement adds (its line and column, which the comparison sets aside, ADR-015) ...
+    const PLACED_ERROR = `${ AGGREGATE }(4,14): error TS2322: Type 'string' is not assignable to type 'number'.`;
+    // ... and a base error, in tsc's pretty form, that the placement only moves down the file (and tsc colours).
+    const BASE_ERROR_AT = ( line: number ) => `src/orders/Broken.ts:${ line }:1 - error TS2304: Cannot find name 'x'.`;
+    const COLOURED_BASE_ERROR_AT = ( line: number ) => `\u001b[96msrc/orders/Broken.ts\u001b[0m:${ line }:1 - \u001b[91merror\u001b[0m TS2304: Cannot find name 'x'.`;
+    const BASE_ERROR_KEY = 'src/orders/Broken.ts - error TS2304: Cannot find name \'x\'.';
+
+    it( 'Given a scaffolder that places two fragments into an existing file and a typecheck that exits 0, when the job runs, then the commit holds the edit, placed[] lists them, stillOwed owes only the owed ones and typecheck is green', async () => {
+      // GIVEN
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      // A second fragment with c1's key (node|file|at.kind|declares): one placed[] entry per key.
+      writePlan( fx, { ...PLACING_PLAN, fragments: [ ...PLACING_FRAGMENTS, PLACING_FRAGMENTS[ 1 ] ] } );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      const tip = originTip( fx );
+      expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, stillOwed: outcome.result?.stillOwed } )
+        .toEqual( { status: 'done', outcome: 'done', committed: true, stillOwed: STILL_OWED } );
+      expect( changesOf( fx, tip ) ).toEqual( [ `A\t${ REPORT }`, `A\t${ PLACED }`, `M\t${ AGGREGATE }`, `A\t${ PLACED_TEST }`, `M\t${ BARREL }` ] );
+      expect( showAt( fx, tip, AGGREGATE ) ).toBe( PLACED_AGGREGATE );
+      const report = reportAt( fx, tip );
+      expect( { placed: report?.placed, stillOwed: report?.stillOwed, typecheck: report?.typecheck } ).toEqual( {
+        placed: PLACED_ENTRIES, stillOwed: STILL_OWED, typecheck: { command: typecheckCommand( fx.root ), status: 'green', newErrors: [] },
+      } );
+      // The residue a placing agent would take: the owed topology fragment only.
+      expect( ( report?.worklist as { node: string }[] ).map( ( f ) => f.node ) ).toEqual( [ 'c3' ] );
+      // Green on the first typecheck: the scaffolder ran once, never with --no-place.
+      expect( { runs: argvLog( fx ), typechecks: typecheckRuns( fx ) } ).toEqual( {
+        runs: [ [ '--write', '--json', '--design', `${ BUNDLE }/design.json`, '--map', `${ BUNDLE }/map.json` ] ], typechecks: 1,
+      } );
+    }, 120_000 );
+
+    it( 'Given a typecheck that prints an error only when the placement is present, when the job runs, then the --no-place tree is committed, the placed fragments are owed placed-but-red and typecheck is dropped with that error', async () => {
+      // GIVEN
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...PLACING_PLAN, typecheck: [ { line: PLACED_ERROR, when: { file: AGGREGATE, includes: 'DismissOrder' } } ] } );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      const tip = originTip( fx );
+      const owed = [
+        { node: 'c1', reason: 'placed-but-red', detail: AGGREGATE }, ...STILL_OWED.slice( 0, 1 ),
+        { node: 'i1', reason: 'placed-but-red', detail: AGGREGATE }, ...STILL_OWED.slice( 1 ),
+      ];
+      // Never held: the step is done, its commit the one without placements.
+      expect( { status: outcome.status, outcome: outcome.result?.outcome, committed: outcome.result?.committed, commitSha: outcome.result?.commitSha, stillOwed: outcome.result?.stillOwed } )
+        .toEqual( { status: 'done', outcome: 'done', committed: true, commitSha: tip, stillOwed: owed } );
+      expect( changesOf( fx, tip ) ).toEqual( [ `A\t${ REPORT }`, `A\t${ PLACED }`, `A\t${ PLACED_TEST }`, `M\t${ BARREL }` ] );
+      expect( showAt( fx, tip, AGGREGATE ) ).toBe( AGGREGATE_CODE );
+      const report = reportAt( fx, tip );
+      expect( { placed: report?.placed, stillOwed: report?.stillOwed, typecheck: report?.typecheck } ).toEqual( {
+        placed: [], stillOwed: owed,
+        typecheck: { command: typecheckCommand( fx.root ), status: 'dropped', newErrors: [ `${ AGGREGATE }: error TS2322: Type 'string' is not assignable to type 'number'.` ] },
+      } );
+      expect( ( report?.scaffolder as { fragments: { placement?: unknown }[] } ).fragments.filter( ( f ) => f.placement !== undefined ) ).toEqual( [] );
+      // The rebuild ran the scaffolder again with --no-place, and typechecked both trees.
+      expect( { runs: argvLog( fx ).map( ( argv ) => argv.includes( '--no-place' ) ), typechecks: typecheckRuns( fx ) } ).toEqual( { runs: [ false, true ], typechecks: 2 } );
+    }, 120_000 );
+
+    it( 'Given a typecheck that prints the same error with and without the placement (at another line), when the job runs, then the placements are committed and typecheck is red-base', async () => {
+      // GIVEN
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...PLACING_PLAN, typecheck: [
+        { line: COLOURED_BASE_ERROR_AT( 9 ), when: { file: AGGREGATE, includes: 'DismissOrder' } },
+        { line: BASE_ERROR_AT( 1 ), unless: { file: AGGREGATE, includes: 'DismissOrder' } },
+      ] } );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      const tip = originTip( fx );
+      expect( { status: outcome.status, committed: outcome.result?.committed, stillOwed: outcome.result?.stillOwed } ).toEqual( { status: 'done', committed: true, stillOwed: STILL_OWED } );
+      expect( changesOf( fx, tip ) ).toEqual( [ `A\t${ REPORT }`, `A\t${ PLACED }`, `M\t${ AGGREGATE }`, `A\t${ PLACED_TEST }`, `M\t${ BARREL }` ] );
+      expect( showAt( fx, tip, AGGREGATE ) ).toBe( PLACED_AGGREGATE );
+      const report = reportAt( fx, tip );
+      expect( { placed: report?.placed, typecheck: report?.typecheck } ).toEqual( {
+        placed: PLACED_ENTRIES, typecheck: { command: typecheckCommand( fx.root ), status: 'red-base', newErrors: [] },
+      } );
+      expect( argvLog( fx ).map( ( argv ) => argv.includes( '--no-place' ) ) ).toEqual( [ false, true ] );
+    }, 120_000 );
+
+    it( 'Given a typecheck that prints the same error with and without the placement but exits 0 without it, when the job runs, then the base is not red and the placements are dropped', async () => {
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...PLACING_PLAN, typecheck: [ { line: BASE_ERROR_AT( 1 ) } ], exitIf: { file: AGGREGATE, includes: 'DismissOrder' } } );
+
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // A base that exits 0 is not red, refused before the error sets are compared (scaffold-commit.py judge_red): nothing
+      // is listed, and the set did not grow.
+      const tip = originTip( fx );
+      expect( { status: outcome.status, aggregate: showAt( fx, tip, AGGREGATE ), placed: reportAt( fx, tip )?.placed, typecheck: reportAt( fx, tip )?.typecheck } ).toEqual( {
+        status: 'done', aggregate: AGGREGATE_CODE, placed: [], typecheck: { command: typecheckCommand( fx.root ), status: 'dropped', newErrors: [] },
+      } );
+    }, 120_000 );
+
+    it( 'Given a scaffolder that placed nothing (fragments present or owed) and a red typecheck, when the job runs, then typecheck is red-base and the scaffolder is not run again', async () => {
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...FIRST_PLAN, fragments: PLACING_FRAGMENTS.slice( 2 ), typecheck: [ { line: BASE_ERROR_AT( 1 ) } ] } );
+
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      const report = reportAt( fx, originTip( fx ) );
+      expect( { status: outcome.status, committed: outcome.result?.committed, placed: report?.placed, typecheck: report?.typecheck, runs: argvLog( fx ).length, typechecks: typecheckRuns( fx ) } ).toEqual( {
+        status: 'done', committed: true, placed: [], typecheck: { command: typecheckCommand( fx.root ), status: 'red-base', newErrors: [] }, runs: 1, typechecks: 1,
+      } );
+    }, 120_000 );
+
+    it( 'Given a typecheck red with and without the placement but printing no `error TS<n>` line, when the job runs, then the placements are dropped (fail-safe, ADR-015)', async () => {
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...PLACING_PLAN, typecheck: [ { line: 'Build failed: see above.' } ] } );
+
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      const tip = originTip( fx );
+      expect( { status: outcome.status, aggregate: showAt( fx, tip, AGGREGATE ), typecheck: reportAt( fx, tip )?.typecheck } ).toEqual( {
+        status: 'done', aggregate: AGGREGATE_CODE, typecheck: { command: typecheckCommand( fx.root ), status: 'dropped', newErrors: [] },
+      } );
+    }, 120_000 );
+
+    it( 'Given a base error the placement prints a second time, when the job runs, then the second copy is a new error and the placements are dropped', async () => {
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...PLACING_PLAN, typecheck: [ { line: BASE_ERROR_AT( 1 ) }, { line: BASE_ERROR_AT( 7 ), when: { file: AGGREGATE, includes: 'DismissOrder' } } ] } );
+
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      const tip = originTip( fx );
+      expect( { status: outcome.status, aggregate: showAt( fx, tip, AGGREGATE ), typecheck: reportAt( fx, tip )?.typecheck } ).toEqual( {
+        status: 'done', aggregate: AGGREGATE_CODE, typecheck: { command: typecheckCommand( fx.root ), status: 'dropped', newErrors: [ BASE_ERROR_KEY ] },
+      } );
+    }, 120_000 );
+
+    it( 'Given red placements and a scaffolder that fails when rebuilt with --no-place, when the job runs, then the job fails scaffold-failed and origin\'s tip is unmoved', async () => {
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...PLACING_PLAN, noPlaceExit: 1, typecheck: [ { line: PLACED_ERROR, when: { file: AGGREGATE, includes: 'DismissOrder' } } ] } );
+
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      expect( { status: outcome.status, error: outcome.result?.error, exitCode: outcome.result?.exitCode, tip: originTip( fx ), runs: argvLog( fx ).length } )
+        .toEqual( { status: 'failed', error: 'scaffold-failed', exitCode: 1, tip: sha1, runs: 2 } );
+    }, 120_000 );
+
+    it( 'Given a scaffolder that reports a fragment placed into a file outside the repository, when the job runs, then the job fails scaffold-output-invalid and origin\'s tip is unmoved', async () => {
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      writePlan( fx, { ...FIRST_PLAN, fragments: [ fragment( 'c1', 'command', '../outside.ts', { at: { kind: 'top-level' }, placement: { status: 'placed' } } ) ] } );
+
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      expect( { status: outcome.status, error: outcome.result?.error, tip: originTip( fx ), typechecks: typecheckRuns( fx ) } )
+        .toEqual( { status: 'failed', error: 'scaffold-output-invalid', tip: sha1, typechecks: 0 } );
+    }, 120_000 );
+
+    it( 'Given designTooling declares scaffold but no typecheck, when the job runs, then the placements are committed and typecheck is undeclared', async () => {
+      // GIVEN
+      const fx = makeFixture();
+      const sha1 = originTip( fx );
+      writePlan( fx, PLACING_PLAN );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      const tip = originTip( fx );
+      expect( { status: outcome.status, committed: outcome.result?.committed } ).toEqual( { status: 'done', committed: true } );
+      expect( showAt( fx, tip, AGGREGATE ) ).toBe( PLACED_AGGREGATE );
+      const report = reportAt( fx, tip );
+      expect( { placed: report?.placed, typecheck: report?.typecheck } ).toEqual( { placed: PLACED_ENTRIES, typecheck: { command: null, status: 'undeclared', newErrors: [] } } );
+      expect( argvLog( fx ).length ).toBe( 1 );
+    }, 120_000 );
+
+    it( 'Given a scaffolder whose fragments carry no placement field and a declared typecheck that is red, when the job runs, then scaffold.json is the report Steward wrote before it committed placements: worklist, stillOwed not-placed, placed [], typecheck null, and no typecheck runs', async () => {
+      // GIVEN
+      const fx = makeFixture( { typecheck: true } );
+      const sha1 = originTip( fx );
+      const OLD_FRAGMENTS = [
+        fragment( 'c1', 'command', AGGREGATE ),
+        fragment( 'r1', 'registration', SERVER ),
+        fragment( 's1', 'command', 'unplaced:SC-1' ),
+      ];
+      writePlan( fx, { ...FIRST_PLAN, fragments: OLD_FRAGMENTS, typecheck: [ { line: BASE_ERROR_AT( 1 ) } ] } );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      const tip = originTip( fx );
+      expect( { status: outcome.status, committed: outcome.result?.committed, runs: argvLog( fx ).length, typechecks: typecheckRuns( fx ) } )
+        .toEqual( { status: 'done', committed: true, runs: 1, typechecks: 0 } );
+      const sha256 = ( text: string ) => `sha256:${ createHash( 'sha256' ).update( text ).digest( 'hex' ) }`;
+      // The report Steward wrote before it committed placements, for this run, written out by hand.
+      expect( reportAt( fx, tip ) ).toEqual( {
+        version: 1, status: 'done', mode: 'hosted-cli', ticket: KEY, baseSha: sha1,
+        inputs: { maps: [ { file: `${ BUNDLE }/map.json`, digest: sha256( '{"scenarios":[]}\n' ) } ], design: sha256( designJson( 'Order Placed' ) ), graph: expect.stringMatching( /^sha256:[0-9a-f]{64}$/ ) },
+        created: [ { file: PLACED, node: 'e1' }, { file: PLACED_TEST, node: 't1' } ],
+        appended: [ { kind: 'barrel', file: BARREL, node: 'e1', code: PLACED_LINE } ],
+        manifest: [ { file: PLACED, node: 'e1', blob: blobOf( EVENT_STUB( 'OrderPlaced' ) ) }, { file: PLACED_TEST, node: 't1', blob: blobOf( TODO_TEST ) } ],
+        worklist: [ OLD_FRAGMENTS[ 0 ] ], placed: [], held: [], asked: [],
+        stillOwed: [ { node: 'c1', reason: 'not-placed', detail: AGGREGATE }, { node: 'r1', reason: 'registration', detail: SERVER }, { node: 's1', reason: 'registration', detail: 'unplaced:SC-1' } ],
+        stale: [], edited: [], observe: null, typecheck: null, scenarioTests: [], unplaced: [], scenariosExcluded: [],
+        scaffolder: {
+          files: [ { kind: 'code', file: PLACED, node: 'e1', content: EVENT_STUB( 'OrderPlaced' ) }, { kind: 'test', file: PLACED_TEST, node: 't1', content: TODO_TEST } ],
+          fragments: OLD_FRAGMENTS, appends: [ { kind: 'barrel', file: BARREL, node: 'e1', code: PLACED_LINE } ], hosted: [], skipped: [], deferred: [], dropped: [],
+          held: [], testPlan: { configured: true, suites: [], undecided: [] }, scenarioTests: [], unplaced: [], scenariosExcluded: [], written: true,
+        },
+      } );
+    }, 120_000 );
+  } );
 } );
