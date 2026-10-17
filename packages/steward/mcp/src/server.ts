@@ -29,6 +29,7 @@ import {
   getMapLinksHandler,
   getMarksHandler,
   getSpecHandler,
+  handOffHandler,
   kpiLookupHandler,
   mapChooseHandler,
   mapCoverHandler,
@@ -234,6 +235,10 @@ const kpiLookupInputShape = {
   op: z.enum([ 'search', 'resolve' ]),
   text: z.string().min( 1 ).max( 512 ).optional(),
   ref: z.string().min( 1 ).max( 512 ).optional()
+};
+
+const handOffInputShape = {
+  summary: z.string().min( 1 ).max( 2000 )
 };
 
 const markSyncedInputShape = {
@@ -548,6 +553,12 @@ export function createBlueprintMcpServer( options: BlueprintMcpServerOptions ): 
     description: describe( 'kpi_lookup' ),
     inputSchema: input( 'kpi_lookup', kpiLookupInputShape )
   }, async ( args ) => answer( 'kpi_lookup', await kpiLookupHandler( context, args )) );
+
+  server.registerTool( 'hand_off', {
+    title: 'Hand a redesign off to #general',
+    description: describe( 'hand_off' ),
+    inputSchema: input( 'hand_off', handOffInputShape )
+  }, async ( args ) => answer( 'hand_off', await handOffHandler( context, args )) );
 
   server.registerTool( 'map_ground', {
     title: 'Ground the map',

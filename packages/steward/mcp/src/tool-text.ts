@@ -25,6 +25,7 @@ export const FALLBACK_DESCRIPTIONS = {
   mark_synced: 'Move the sync cursor to a seq.',
   status: 'Read the session\'s status: seqs, unread ops, lock state, git sha and capabilities.',
   kpi_lookup: 'Search for or resolve a KPI in the repository\'s observability, through the host.',
+  hand_off: 'Hand a card thread\'s redesign off to #general, once per reply job; the host queues a design round.',
   map_ground: 'Set the map\'s shape, once per session.',
   map_post: 'Create or replace one map node or fork by id.',
   map_propose_scenario: 'Propose one scenario; answers its minted id.',

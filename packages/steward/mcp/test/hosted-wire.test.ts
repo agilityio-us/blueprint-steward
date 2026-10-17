@@ -240,6 +240,30 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     await client.close();
   });
 
+  it( 'Given a hosted reply job when hand_off is called then it forwards the hand-off verb over submit and answers the host\'s result; a host refusal comes back as its code (Blueprint ADR-137 decision 5)', async () => {
+    // The answers as Blueprint's submit route sends them (sessionRoutes.ts handOff): the result, then a second call's refusal.
+    const result = { verb: 'hand-off', postId: 'c-7', noteId: 'c-8', design: { queued: true, jobId: 'job-9', position: 'queued' } };
+    const host = createFakeHost({ script: [
+      { status: 200, body: { ok: true, submissionId: 's', seqs: [ 12 ], result } },
+      { status: 409, body: { ok: false, error: { code: 'HAND_OFF_ALREADY_DONE', message: 'reply job job-1 has already handed off; a reply job hands off once' } } }
+    ] });
+    const client = await connect( host );
+
+    const handed = await client.callTool({ name: 'hand_off', arguments: { summary: 'a guest checkout is a redesign' } });
+    const again = await client.callTool({ name: 'hand_off', arguments: { summary: 'a guest checkout is a redesign' } });
+
+    expect( host.calls.map( call => [ call.method, call.route, call.authorization, call.session, call.verb, call.args ] )).toEqual( [
+      [ 'POST', SUBMIT_ROUTE, `Bearer ${ TOKEN }`, SESSION, 'hand-off', { summary: 'a guest checkout is a redesign' } ],
+      [ 'POST', SUBMIT_ROUTE, `Bearer ${ TOKEN }`, SESSION, 'hand-off', { summary: 'a guest checkout is a redesign' } ]
+    ] );
+    expect( handed.isError ).not.toBe( true );
+    expect( toolBody( handed )).toEqual({ ok: true, ...result });
+    expect( again.isError ).toBe( true );
+    expect( toolBody( again )).toMatchObject({ ok: false, error: { code: 'HAND_OFF_ALREADY_DONE' } });
+
+    await client.close();
+  });
+
   it( 'Given a host whose first answer to a propose is lost when the retry is acked as already recorded then the agent is answered ok with the seqs it landed at, and the write landed once', async () => {
     const host = createFakeHost();
     let dropped = false;

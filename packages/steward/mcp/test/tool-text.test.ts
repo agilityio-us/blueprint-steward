@@ -78,12 +78,12 @@ describe( 'the served tool text', () => {
     expect( other.error ).not.toHaveProperty( 'recovery' );
   });
 
-  it( 'Given no served document when the server is created then every one of the 34 tools is described by its fallback, no input field is described and no refusal carries a recovery', async () => {
+  it( 'Given no served document when the server is created then every one of the 35 tools is described by its fallback, no input field is described and no refusal carries a recovery', async () => {
     const { descriptions, schemas, instructions, strike } = await connect( undefined, refusingStrike( 'MAP_EXAMPLE_NOT_OWN' ));
 
     expect( instructions ).toBe( FALLBACK_INSTRUCTIONS );
     expect( Object.values( schemas ).flatMap( fieldDescriptions )).toEqual( [] );
-    expect( Object.keys( descriptions )).toHaveLength( 34 );
+    expect( Object.keys( descriptions )).toHaveLength( 35 );
     expect( descriptions ).toEqual( FALLBACK_DESCRIPTIONS );
     expect(( await strike()).error ).not.toHaveProperty( 'recovery' );
   });
@@ -123,7 +123,7 @@ describe( 'the served tool text', () => {
     expect( descriptions.propose ).toBe( FALLBACK_DESCRIPTIONS.propose );
     expect( descriptions.modify ).toBe( 'Served modify.' );
     expect( descriptions ).not.toHaveProperty( 'not_a_tool' );
-    expect( Object.keys( descriptions )).toHaveLength( 34 );
+    expect( Object.keys( descriptions )).toHaveLength( 35 );
   });
 
   it( 'Given a document of another version or not an object then it is not read as one', () => {

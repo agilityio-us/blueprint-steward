@@ -36,7 +36,7 @@ import type { Op } from '@bett3r-dev/blueprint-schema';
 
 import { marksFromAnnotations } from './board-marks.js';
 import { BlueprintMcpError } from './errors.js';
-import type { BlueprintTarget, KpiLookupAnswer, SpecRead } from './handlers.js';
+import type { BlueprintTarget, HandOffResult, KpiLookupAnswer, SpecRead } from './handlers.js';
 
 export type HostedTargetOptions = {
   hostUrl: string;
@@ -96,7 +96,7 @@ type HostedVerb =
   | 'propose' | 'modify' | 'remove' | 'comment' | 'resolve' | 'reclassify' | 'undo'
   | 'map-ground' | 'map-post' | 'map-strike' | 'map-choose'
   | 'map-link' | 'map-unlink' | 'map-cover' | 'map-uncover' | 'map-undo'
-  | 'spec-post' | 'spec-strike';
+  | 'spec-post' | 'spec-strike' | 'hand-off';
 
 function redactor( token: string ): ( text: string ) => string {
   return ( text ) => ( token === '' ? text : text.split( token ).join( '[redacted]' ) );
@@ -375,6 +375,8 @@ export function createHostedTarget( options: HostedTargetOptions ): BlueprintTar
       const { seq, spec } = await submit<SpecRead>( 'spec-strike', input );
       return { seq, spec };
     },
+    // Blueprint ADR-137 decision 5: the hand-off is a submit verb too; the host answers its result with no events to rebuild.
+    handOff: ( input ) => submit<HandOffResult>( 'hand-off', input ),
     readSpec: async () => {
       const { seq, spec } = await read<SpecRead>( SPEC_ROUTE );
       return { seq, spec };

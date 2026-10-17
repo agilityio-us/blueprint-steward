@@ -13,7 +13,7 @@ import { BLUEPRINT_MCP_CAPABILITIES, UNFAMILIED_TOOLS } from '../src/capabilitie
 const BIN = fileURLToPath( new URL( '../bin/blueprint-mcp.mjs', import.meta.url ));
 
 describe( 'blueprint-mcp tools over stdio', () => {
-  it( 'Given the binary booted on a hosted session when its tools are listed then there are exactly 34, start_map_session is not among them, and they are the families and the unfamilied tools', async () => {
+  it( 'Given the binary booted on a hosted session when its tools are listed then there are exactly 35, start_map_session is not among them, and they are the families and the unfamilied tools', async () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [ BIN ],
@@ -35,7 +35,7 @@ describe( 'blueprint-mcp tools over stdio', () => {
       const names = ( await client.listTools()).tools.map( tool => tool.name ).sort();
       const classified = [ ...Object.values( BLUEPRINT_MCP_CAPABILITIES.families ).flat(), ...UNFAMILIED_TOOLS ].sort();
 
-      expect( names ).toHaveLength( 34 );
+      expect( names ).toHaveLength( 35 );
       expect( names ).not.toContain( 'start_map_session' );
       expect( names ).toEqual( classified );
     } finally {

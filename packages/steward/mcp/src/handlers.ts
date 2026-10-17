@@ -130,6 +130,19 @@ export type BlueprintTarget = {
   readSpec: () => Promise<SpecRead>;
   specPost: ( input: SpecPostOpPayload ) => Promise<SpecRead>;
   specStrike: ( input: SpecStrikeOpPayload ) => Promise<SpecRead>;
+  /** Blueprint ADR-137 decision 5: a reply job's hand-off of a redesign to #general, the host's `hand-off` submit verb. */
+  handOff: ( input: HandOffInput ) => Promise<HandOffResult>;
+};
+
+/** What a hand-off sends: the redesign the thread's question needs, in a line or two. */
+export type HandOffInput = { summary: string };
+
+/** The host's answer (Blueprint's sessionRoutes.ts handOff): the two posts and the design job it queued. */
+export type HandOffResult = {
+  verb: 'hand-off';
+  postId: string;
+  noteId: string;
+  design?: { queued: true; jobId: string; position?: string } | { queued: false; code: string };
 };
 
 /** The spec as the spec route answers it, with the feed seq it reflects. */
@@ -553,6 +566,14 @@ export async function kpiLookupHandler(
     const request: KpiLookupRequest = args.op === 'search' ? { op: 'search', text: args.text ?? '' } : { op: 'resolve', ref: args.ref ?? '' };
     return { ok: true, ...await targetOf( context ).kpiLookup( request ) };
   });
+}
+
+// Blueprint ADR-137 decision 5: relays the hand-off and answers what the host answered; its refusals come back as their codes.
+export async function handOffHandler(
+  context: HandlerContext,
+  args: HandOffInput
+): Promise<ToolOutcome<HandOffResult>> {
+  return runTool<HandOffResult>( async () => ({ ok: true, ...await targetOf( context ).handOff({ summary: args.summary }) }));
 }
 
 export type MapGroundArgs = Omit<MapGroundInput, 'author'>;

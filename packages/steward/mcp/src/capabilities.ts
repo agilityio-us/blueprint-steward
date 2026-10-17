@@ -7,6 +7,7 @@ export const BLUEPRINT_MCP_CAPABILITIES = {
       'comment',
       'get_design',
       'get_flow',
+      'hand_off',
       'modify',
       'propose',
       'reclassify',
