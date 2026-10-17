@@ -146,7 +146,7 @@ const scaffoldCommitOf = async ( git, dir, tip, sha, reportPath ) => {
 
 // Classify the scaffolder's --json report: a blocked unit whose every decision is no-template is still owed, any other
 // is asked; a scenario test on a decision is asked; a topology fragment the scaffolder did not place is owed not-placed
-// and on the worklist, any other unplaced fragment owed as registration; a deferred unit is owed deferred. A fragment is
+// and on the worklist (an edge stub is topology), any other unplaced fragment owed as registration; a deferred unit is owed deferred. A fragment is
 // owed when its placement is owed or absent (a scaffolder that does not place); a placed or present one is not.
 // `dropped`: fragments placed in a tree the typecheck rejected, owed placed-but-red.
 const isOwed = ( f ) => ( f?.placement?.status ?? 'owed' ) === 'owed';
@@ -162,7 +162,9 @@ const classify = ( result, dropped = [] ) => {
   for ( const t of result.scenarioTests ?? [] ) {
     if ( t?.outcome === 'decision' ) asked.push( { node: t.scenarioId, question: 'scenario test placement needs a decision' } );
   }
-  const isTopology = ( f ) => TOPOLOGY.includes( f?.artifact ) && !String( f?.file ?? '' ).startsWith( 'unplaced:' );
+  // A fragment carrying edge is an edge stub, placed and owed as topology of its subject; that subject's registration
+  // fragment carries none and stays registration (scaffold-commit.py is_topology).
+  const isTopology = ( f ) => ( TOPOLOGY.includes( f?.artifact ) || Boolean( f?.edge ) ) && !String( f?.file ?? '' ).startsWith( 'unplaced:' );
   const worklist = byKey( ( result.fragments ?? [] ).filter( ( f ) => isTopology( f ) && isOwed( f ) ), 'node', 'file' );
   for ( const f of ( result.fragments ?? [] ).filter( isOwed ) ) owed.push( { node: f?.node, reason: isTopology( f ) ? 'not-placed' : 'registration', detail: f?.file } );
   for ( const f of dropped ) owed.push( { node: f?.node, reason: 'placed-but-red', detail: f?.file } );
@@ -178,8 +180,18 @@ const reportsPlacement = ( result ) => ( result.fragments ?? [] ).some( ( f ) =>
 // `blob`, the object id of the file this commit holds, and `digest`, the sha256 of the text the placer left, which
 // those offsets index, both only when a checkout of the blob is that text (none for a file it does not commit). One
 // entry per key, this run's first, then the earlier placements a press kept, with no blob and no digest: their offsets
-// index an earlier press's file (Blueprint ADR-128).
-const keyOf = ( f ) => [ f?.node, f?.file, f?.at?.kind, f?.declares ].map( ( v ) => ( v === undefined || v === null ? '' : String( v ) ) ).join( '|' );
+// index an earlier press's file (Blueprint ADR-128). The two fragments of one edge (a projector stub and its events-map
+// entry) share all four key fields, so an edge fragment's key appends |edge:<from>|<to>|<kind>|<container> (container:
+// a variable's name, else [within.]call(arg)); a fragment with no edge keeps the four-field key (Blueprint ADR-129;
+// scaffold-commit.py fragment_key is the same). An edge stub's entry carries inserted, blob and digest like any other
+// placement, so a re-press takes an untouched one out byte-exact.
+const textOf = ( v ) => ( v === undefined || v === null ? '' : String( v ) );
+const containerKey = ( c ) => ( c?.variable !== undefined && c?.variable !== null ? textOf( c.variable )
+  : c?.call !== undefined && c?.call !== null ? `${ c.within ? `${ c.within }.` : '' }${ c.call }(${ textOf( c.arg ) })` : '' );
+const keyOf = ( f ) => {
+  const key = [ f?.node, f?.file, f?.at?.kind, f?.declares ].map( textOf ).join( '|' );
+  return f?.edge ? `${ key }|edge:${ [ f.edge.from, f.edge.to, f.edge.kind ].map( textOf ).join( '|' ) }|${ containerKey( f.at?.container ) }` : key;
+};
 const placedEntries = ( fragments, kept = [], bound = {} ) => {
   const entries = new Map();
   for ( const f of fragments ) {

@@ -646,6 +646,63 @@ describe( 'blueprint-steward scaffold job', () => {
       } );
     }, 120_000 );
 
+    // An edge stub carries the edge and its subject's artifact (here a read model, which TOPOLOGY does not name); its
+    // registration fragment carries no edge. The host file's name is immaterial to Steward.
+    const PROJECTION = { from: 'e9', to: 'rm1', kind: 'projected-to' };
+    const PROJECTOR = { call: 'withProjector', arg: 'returned-object' };
+    const EVENTS_MAP = { variable: 'ORDER_EVENTS' };
+
+    it( 'Given an owed read-model fragment carrying an edge and its owed registration fragment, when the job runs, then the edge fragment is topology (on the worklist, owed not-placed) and the registration is not (owed registration)', async () => {
+      // GIVEN
+      const fx = makeFixture();
+      const sha1 = originTip( fx );
+      const STUB = fragment( 'rm1', 'read-model', AGGREGATE, { edge: PROJECTION, at: { kind: 'object-property', container: PROJECTOR }, declares: 'OrderShipped', placement: { status: 'owed', reason: 'anchor-not-found' } } );
+      const REGISTRATION = fragment( 'rm1', 'read-model', SERVER, { placement: { status: 'owed', reason: 'no-anchor' } } );
+      writePlan( fx, { ...FIRST_PLAN, fragments: [ STUB, REGISTRATION ] } );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      const report = reportAt( fx, originTip( fx ) );
+      expect( { status: outcome.status, worklist: report?.worklist, stillOwed: report?.stillOwed } ).toEqual( {
+        status: 'done', worklist: [ STUB ],
+        stillOwed: [ { node: 'rm1', reason: 'not-placed', detail: AGGREGATE }, { node: 'rm1', reason: 'registration', detail: SERVER } ],
+      } );
+    }, 120_000 );
+
+    it( 'Given the two placed fragments of one projected-to edge (its events-map entry and its projector stub: same node, file, at.kind, declares and edge), when the job runs, then placed[] holds one entry per fragment, keyed with the edge and the container', async () => {
+      // GIVEN
+      const fx = makeFixture();
+      const sha1 = originTip( fx );
+      const ENTRY = 'OrderShipped: OrderEvents.OrderShipped,\n';
+      const HANDLER = 'OrderShipped: async () => {},\n';
+      const edgeFragment = ( container: Record<string, string>, offset: number, text: string ) => fragment( 'rm1', 'read-model', AGGREGATE, {
+        edge: PROJECTION, at: { kind: 'object-property', container }, declares: 'OrderShipped', placement: { status: 'placed', inserted: [ { offset, text } ] },
+      } );
+      writePlan( fx, {
+        ...FIRST_PLAN,
+        fragments: [ edgeFragment( PROJECTOR, AGGREGATE_CODE.length + ENTRY.length, HANDLER ), edgeFragment( EVENTS_MAP, AGGREGATE_CODE.length, ENTRY ) ],
+        edits: [ { file: AGGREGATE, code: ENTRY }, { file: AGGREGATE, code: HANDLER } ],
+      } );
+
+      // WHEN
+      const outcome = await scaffoldAt( fx, sha1 );
+
+      // THEN
+      // An edge stub's entry is bound like any other placement, its spans and the placed file's blob and digest, so a
+      // re-press can take an untouched one out byte-exact.
+      const base = `rm1|${ AGGREGATE }|object-property|OrderShipped|edge:e9|rm1|projected-to`;
+      const bound = boundTo( `${ AGGREGATE_CODE }${ ENTRY }${ HANDLER }` );
+      expect( { status: outcome.status, placed: reportAt( fx, originTip( fx ) )?.placed } ).toEqual( {
+        status: 'done',
+        placed: [
+          { node: 'rm1', file: AGGREGATE, key: `${ base }|ORDER_EVENTS`, inserted: [ { offset: AGGREGATE_CODE.length, text: ENTRY } ], ...bound },
+          { node: 'rm1', file: AGGREGATE, key: `${ base }|withProjector(returned-object)`, inserted: [ { offset: AGGREGATE_CODE.length + ENTRY.length, text: HANDLER } ], ...bound },
+        ],
+      } );
+    }, 120_000 );
+
     it( 'Given a typecheck that prints an error only when the placement is present, when the job runs, then the --no-place tree is committed, the placed fragments are owed placed-but-red and typecheck is dropped with that error', async () => {
       // GIVEN
       const fx = makeFixture( { typecheck: true } );
