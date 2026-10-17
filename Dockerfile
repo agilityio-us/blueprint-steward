@@ -36,9 +36,12 @@ COPY --from=build --chown=root:root /out /opt/blueprint-steward
 COPY --chmod=0755 deploy/docker/steward-entrypoint.sh /usr/local/bin/steward-entrypoint
 RUN ln -s /opt/blueprint-steward/bin/blueprint-steward.mjs /usr/local/bin/blueprint-steward
 # corepack fetches the served repository's pinned package manager on first use; keep it and pnpm's store on the volume.
+# The agent's Claude sessions (a card thread's conversation, resumed by its next question) live on the volume too, so a
+# restart keeps them: Steward runs claude with CLAUDE_CONFIG_DIR there, logged in with CLAUDE_CODE_OAUTH_TOKEN.
 ENV COREPACK_HOME=/work/.corepack \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-    npm_config_store_dir=/work/.pnpm-store
+    npm_config_store_dir=/work/.pnpm-store \
+    BLUEPRINT_STEWARD_AGENT_SESSIONS_DIR=/work/.agent-sessions
 USER node
 WORKDIR /work
 ENTRYPOINT [ "steward-entrypoint" ]
