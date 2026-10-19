@@ -257,6 +257,16 @@ const mapGroundInputShape = {
   shape: z.enum( vocabulary( MAP_SHAPES ))
 };
 
+// BP-231 (D11): the element a walk's keyword exercises. Passthrough, so an extra key reaches the server,
+// whose walk rule judges the shape (D15), instead of being stripped here (ADR-107).
+const walkElementSchema = z.object({ esId: z.string() }).passthrough().optional();
+
+const walkExercisesSchema = z.object({
+  given: walkElementSchema,
+  when: walkElementSchema,
+  then: walkElementSchema
+}).passthrough().optional();
+
 const mapOptionSchema = z.object({
   id: mapIdSchema,
   label: z.string(),
@@ -269,7 +279,8 @@ const mapOptionSchema = z.object({
     when: z.string().optional(),
     then: z.string().optional(),
     // BP-229 (D6): declared here or zod strips it before the post is sent.
-    rejection: z.object({ code: z.string().optional() }).optional()
+    rejection: z.object({ code: z.string().optional() }).optional(),
+    exercises: walkExercisesSchema
   })),
   rejectedBecause: z.string().optional(),
   evidence: z.array( z.string() ).optional()
@@ -342,7 +353,12 @@ const mapCoverInputShape = {
 
 // The card-chat scenario body. Every object is passthrough so the SDK's parse keeps an unknown
 // key for unknownKeysOf to refuse (MAP_ENTRY_INVALID) instead of stripping it (zod's default).
-const gherkinStepSchema = z.object({ text: z.string() }).passthrough();
+// BP-231 (D1): a step may name the eventstorming element it exercises; any other step key is still refused.
+// Whether the server's graph holds that element is the server's to judge, not this fork's (ADR-107).
+const gherkinStepSchema = z.object({
+  text: z.string(),
+  exercises: z.object({ esId: z.string().min( 1 ) }).passthrough().optional()
+}).passthrough();
 
 const scenarioBodyShape = {
   title: z.string(),

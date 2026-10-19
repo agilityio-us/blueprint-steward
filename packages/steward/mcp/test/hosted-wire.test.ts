@@ -137,6 +137,11 @@ function createFakeHost( options: { script?: Scripted[]; design?: DesignFile; gr
       ops.push({ seq: lastSeq, verb: 'comment', author: 'ai', payload: { entries } });
       return jsonResponse( 200, { ok: true, submissionId: body.submissionId, seqs: [ lastSeq ], seq: lastSeq, replayed: false, result: { verb: 'comment', events: [ 'CommentsAdded' ] } });
     }
+    // A map-post is acked as the host acks it, { verb, events }, with the id it landed under.
+    if ( url.pathname === SUBMIT_ROUTE && body?.verb === 'map-post' ){
+      lastSeq += 1;
+      return jsonResponse( 200, { ok: true, submissionId: body.submissionId, seqs: [ lastSeq ], seq: lastSeq, replayed: false, id: 'sc-1', result: { verb: 'map-post', events: [ 'MapEntryPosted' ] } });
+    }
     if ( url.pathname === CHANGES_ROUTE ){
       const since = Number( url.searchParams.get( 'sinceSeq' ) ?? 0 );
       return jsonResponse( 200, { ok: true, ops: ops.filter( op => op.seq > since ) });
@@ -360,6 +365,116 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     expect(( body.nodes as { id: string }[] ).map( node => node.id )).toContain( RESERVE );
     expect( body ).not.toHaveProperty( 'designError' );
     expect( host.calls.map( call => call.route )).toEqual( [ API_BLUEPRINT_DESIGN_JSON ] );
+
+    await client.close();
+  });
+
+  // BP-231 (D1): a step names the eventstorming element it exercises. Steward holds no element check (ADR-107): the
+  // bound step reaches the host as sent, and the host decides.
+  const BOUND_SCENARIO = {
+    title: 'A placed order ships',
+    given: [ { text: 'an order' } ],
+    when: [ { text: 'the order is placed', exercises: { esId: 'x' } } ],
+    then: [ { text: 'it ships' } ]
+  };
+
+  it( 'Given the steward MCP over a fake hosted target when map_propose_scenario is called with when[0] = {text, exercises: {esId: \'x\'}} then the hosted target receives the step with exercises', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({ name: 'map_propose_scenario', arguments: BOUND_SCENARIO }));
+
+    expect( body ).toMatchObject({ ok: true, id: 'sc-1' });
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect( submits ).toHaveLength( 1 );
+    expect( submits[ 0 ] ).toMatchObject({ verb: 'map-post', args: { level: 'scenario' } });
+    expect( submits[ 0 ].args?.when ).toEqual( [ { text: 'the order is placed', exercises: { esId: 'x' } } ] );
+
+    await client.close();
+  });
+
+  it.each( [
+    { label: 'a step key other than text and exercises', when: [ { text: 'the order is placed', note: 'n' } ], field: 'when.0.note' },
+    { label: 'a key beside esId in exercises', when: [ { text: 'the order is placed', exercises: { esId: 'x', kind: 'command' } } ], field: 'when.0.exercises.kind' }
+  ] )( 'Given the steward MCP over a fake hosted target when map_propose_scenario carries $label then it is refused MAP_ENTRY_INVALID naming it and nothing reaches the host', async ( { when, field } ) => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const result = await client.callTool({ name: 'map_propose_scenario', arguments: { ...BOUND_SCENARIO, when } });
+
+    expect( result.isError ).toBe( true );
+    expect( toolBody( result )).toMatchObject({ ok: false, error: { code: 'MAP_ENTRY_INVALID', details: { fields: [ field ] } } });
+    expect( host.calls ).toHaveLength( 0 );
+
+    await client.close();
+  });
+
+  it( 'Given the steward MCP over a fake hosted target when map_propose_scenario names an empty esId on a step then the call is refused and nothing reaches the host', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const result = await client.callTool({ name: 'map_propose_scenario', arguments: {
+      ...BOUND_SCENARIO,
+      when: [ { text: 'the order is placed', exercises: { esId: '' } } ]
+    } });
+
+    expect( result.isError ).toBe( true );
+    expect( JSON.stringify( result.content )).toContain( 'esId' );
+    expect( host.calls ).toHaveLength( 0 );
+
+    await client.close();
+  });
+
+  // BP-231 (D11): a fork option's walk names, per keyword, the element its step exercises. Steward forwards the
+  // exercises as sent, an extra key included, and the host's walk rule refuses a bad shape (D15).
+  it( 'Given the steward MCP over a fake hosted target when map_post posts a fork whose walk carries exercises then the hosted target receives the walk with exercises intact', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+    const exercises = { when: { esId: 'x' }, then: { esId: 'y', extra: 'kept for the host to judge' } };
+    const walk = { scenario: 's1', text: 'placing ships', given: 'an order', when: 'it is placed', then: 'it ships', exercises };
+
+    const body = toolBody( await client.callTool({ name: 'map_post', arguments: {
+      level: 'fork',
+      id: 'f1',
+      title: 'How an order ships',
+      card: {
+        problem: 'p',
+        useCases: [],
+        options: [ { id: 'o1', label: 'Ship on place', walks: [ walk ] } ],
+        recommendation: { option: 'o1', why: 'w' },
+        ifOverturned: 'i'
+      }
+    } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect( submits ).toHaveLength( 1 );
+    const card = submits[ 0 ].args?.card as { options: { walks: unknown[] }[] };
+    expect( card.options[ 0 ].walks ).toEqual( [ walk ] );
+
+    await client.close();
+  });
+
+  it( 'Given the steward MCP over a fake hosted target when map_post posts a walk whose exercises names a keyword without an esId then the call is refused and nothing reaches the host', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const result = await client.callTool({ name: 'map_post', arguments: {
+      level: 'fork',
+      id: 'f1',
+      title: 'How an order ships',
+      card: {
+        problem: 'p',
+        useCases: [],
+        options: [ { id: 'o1', label: 'Ship on place', walks: [ { scenario: 's1', text: 't', exercises: { when: {} } } ] } ],
+        recommendation: { option: 'o1', why: 'w' },
+        ifOverturned: 'i'
+      }
+    } });
+
+    expect( result.isError ).toBe( true );
+    expect( JSON.stringify( result.content )).toContain( 'esId' );
+    expect( host.calls ).toHaveLength( 0 );
 
     await client.close();
   });
