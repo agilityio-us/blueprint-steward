@@ -148,7 +148,9 @@ const scaffoldCommitOf = async ( git, dir, tip, sha, reportPath ) => {
 // is asked; a scenario test on a decision is asked; a topology fragment the scaffolder did not place is owed not-placed
 // and on the worklist (an edge stub is topology), any other unplaced fragment owed as registration; a deferred unit is owed deferred. A fragment is
 // owed when its placement is owed or absent (a scaffolder that does not place); a placed or present one is not.
-// `dropped`: fragments placed in a tree the typecheck rejected, owed placed-but-red.
+// `dropped`: fragments placed in a tree the typecheck rejected, owed placed-but-red. The scaffolder's shapeOwed[] lines (a
+// changed or removed field of a data shape already in code, or a shape owed whole) are owed shape-not-written, each line its
+// detail, in the scaffolder's order (by node, then line): the scaffold never rewrites existing code.
 const isOwed = ( f ) => ( f?.placement?.status ?? 'owed' ) === 'owed';
 const classify = ( result, dropped = [] ) => {
   const asked = [];
@@ -169,6 +171,7 @@ const classify = ( result, dropped = [] ) => {
   for ( const f of ( result.fragments ?? [] ).filter( isOwed ) ) owed.push( { node: f?.node, reason: isTopology( f ) ? 'not-placed' : 'registration', detail: f?.file } );
   for ( const f of dropped ) owed.push( { node: f?.node, reason: 'placed-but-red', detail: f?.file } );
   for ( const d of result.deferred ?? [] ) owed.push( { node: d?.node, reason: 'deferred', detail: ( d?.waitsOn ?? [] ).join( ', ' ) } );
+  for ( const s of result.shapeOwed ?? [] ) owed.push( { node: s?.node, reason: 'shape-not-written', detail: s?.line } );
   return { asked, owed: byKey( owed, 'node', 'reason' ), worklist };
 };
 
