@@ -478,4 +478,38 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
 
     await client.close();
   });
+
+  // BP-279: the hosted door stores tags as sent (attributedDesignPayload), so the tool normalises them on send.
+  it( 'Given propose node with tags [\'Keyed\'] for Listing Visits Recorder when the tool runs then the submission carries [\'keyed\'] and the host stores [\'keyed\'] (BP-279)', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({ name: 'propose', arguments: {
+      nodes: [ { type: 'system', label: 'Listing Visits Recorder', subdomain: 'sales', tags: [ 'Keyed' ] } ]
+    } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect(( submits[ 0 ].args as { nodes: { tags?: string[] }[] } ).nodes[ 0 ].tags ).toEqual( [ 'keyed' ] );
+    expect( host.design.propose?.nodes?.[ 0 ]?.tags ).toEqual( [ 'keyed' ] );
+
+    await client.close();
+  });
+
+  it( 'Given modify set.tags [\' Keyed \', \'keyed\'] when the tool runs then the submission carries [\'keyed\'] (BP-279)', async () => {
+    const host = createFakeHost({ script: [
+      { status: 200, body: { ok: true, submissionId: 'modify-1', seqs: [ 1 ], seq: 1, replayed: false, result: { verb: 'modify', events: [ 'DesignModified' ] } } }
+    ] });
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({ name: 'modify', arguments: {
+      entries: [ { id: RESERVE, set: { tags: [ ' Keyed ', 'keyed' ] } } ]
+    } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    const submits = host.calls.filter( call => call.route === SUBMIT_ROUTE );
+    expect(( submits[ 0 ].args as { entries: { set: { tags?: string[] } }[] } ).entries[ 0 ].set.tags ).toEqual( [ 'keyed' ] );
+
+    await client.close();
+  });
 });

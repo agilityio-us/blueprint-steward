@@ -12,7 +12,7 @@ export const FALLBACK_INSTRUCTIONS = 'Design tools for a hosted Blueprint sessio
 
 export const FALLBACK_DESCRIPTIONS = {
   propose: 'Propose design nodes and edges in one batch; answers the derived node ids.',
-  modify: 'Change the label, subdomain, resourceKey or queries of existing elements by id, in one batch.',
+  modify: 'Change the label, subdomain, resourceKey, queries or tags of existing elements by id, in one batch.',
   remove: 'Remove nodes and edges from the design, in one batch.',
   comment: 'Leave comments on nodes, edges, other comments or the design, in one batch; answers the comment ids.',
   resolve: 'Set or clear the resolved flag of comments by id, in one batch.',
