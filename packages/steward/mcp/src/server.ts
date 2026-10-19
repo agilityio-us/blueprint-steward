@@ -384,7 +384,9 @@ const kpiDefinitionSchema = z.object({
     numerator: kpiEventSideSchema.optional(),
     denominator: kpiEventSideSchema.optional(),
     datasource: z.string().optional(),
-    expr: z.string().optional()
+    expr: z.string().optional(),
+    // BP-230: a string, not an enum, so the handler refuses a value outside the vocabulary by its path.
+    language: z.string().optional()
   }).passthrough()
 }).passthrough();
 
