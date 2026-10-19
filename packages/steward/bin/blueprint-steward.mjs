@@ -24,7 +24,7 @@ import { PR_READY_JOB_KIND, runPrReady } from '../lib/pr-ready.mjs';
 import { IMPLEMENTATION_DISPATCH_JOB_KIND, routineAliases, routineJobHandlers } from '../lib/routine.mjs';
 import { runScaffoldJob, SCAFFOLD_JOB_KIND } from '../lib/scaffold.mjs';
 import { toolList } from '../lib/tool-list.mjs';
-import { trackerJobHandlers } from '../lib/tracker.mjs';
+import { TRACKER_CREATE_JOB_KIND, trackerJobHandlers } from '../lib/tracker.mjs';
 
 const USAGE = `Usage:
   blueprint-steward push    --server <url> [--token <t>] [--repo <path>] [--session <id>] [--no-extract]
@@ -631,7 +631,11 @@ const methodLoadedBy = ( line, names ) => {
 // 1.2.0; it is added here too, deduped, while an installed spec predates it. A claim names it explicitly (its kinds are JOB_HANDLERS'):
 // a claim naming no kinds counts as not running replies, and the server then gives its design claims no agent context.
 const REPLY_JOB_KIND = 'reply';
-const RUNNER_KINDS = [ ...new Set( [ ...RUNNER_JOB_KINDS, REPLY_JOB_KIND ] ) ];
+// Blueprint ADR-121: a baseline-refresh job is queued on a repository's baseline when a merge into its default branch is
+// reported. It and tracker-create (lib/tracker.mjs) are not in RUNNER_JOB_KINDS yet; Blueprint's runnerJobs.ts
+// CLAIMABLE_JOB_KINDS adds both for the claim, so a server without them refuses every claim naming them.
+const BASELINE_REFRESH_JOB_KIND = 'baseline-refresh';
+const RUNNER_KINDS = [ ...new Set( [ ...RUNNER_JOB_KINDS, REPLY_JOB_KIND, BASELINE_REFRESH_JOB_KIND, TRACKER_CREATE_JOB_KIND ] ) ];
 
 // Blueprint ADR-137 decision 2: a reply or design claim may name an agent context, a Claude session the server minted
 // the id of. A design claim names the designer's, and only when the claim declared reply. `fresh` and `rebuilt` start it
@@ -1358,6 +1362,22 @@ const runScaffold = async ( job ) => {
   } );
 };
 
+// A baseline-refresh job brings the baseline's worktree to origin's tip of the job's branch (else origin's default),
+// extracts there and pushes it to the baseline; no agent runs. It runs in the session's lane, holding the worktree
+// exclusively, as a scaffold job does.
+const runBaselineRefresh = async ( job ) => {
+  const branch = job.branch || await remoteDefaultBranch() || undefined;
+  const onStep = ( step ) => beatStep( job, step );
+  let dir;
+  try {
+    dir = await prepareWorktree( job.sessionId, branch, onStep );
+  } catch ( err ) {
+    return { ok: false, reason: err.reason ?? 'checkout-failed', result: err.message };
+  }
+  await push( { extract: true, sessionId: job.sessionId, branch, dir, worktree: true, onStep } );
+  return { ok: true, result: `refreshed the baseline from ${ branch ?? 'HEAD' }` };
+};
+
 // A ticket-branch job has origin carry the branch the job names for a ticket. The branch is
 // created only where origin lacks it: a push with --force-with-lease=<ref>: (an empty expected value, so git refuses
 // the push if the ref exists), from the tip of origin's `base` (its default branch when the job names none). A branch
@@ -1442,6 +1462,7 @@ const JOB_HANDLERS = new Map( [
   // A read for the hosted agent's KPI lookup, outside the session's lane (inSession), so it never
   // waits behind the session's own running design job; in the session's worktree, else the --repo checkout.
   [ OBSERVABILITY_READ_JOB_KIND, async ( job ) => runObservabilityRead( job, { dir: await checkoutOf( job.sessionId ) } ) ],
+  [ BASELINE_REFRESH_JOB_KIND, ( job ) => inSession( job.sessionId, 'exclusive', () => runBaselineRefresh( job ) ) ],
   // The tracker kinds, only with the whole Jira credential in the environment (lib/tracker.mjs).
   ...trackerJobHandlers( {
     baseUrl: process.env.BLUEPRINT_JIRA_BASE_URL, email: process.env.BLUEPRINT_JIRA_EMAIL, apiToken: process.env.BLUEPRINT_JIRA_API_TOKEN,
@@ -1454,9 +1475,9 @@ const JOB_HANDLERS = new Map( [
 // a dispatch only where its alias is held. Never the URL or the token.
 const ROUTINE_ALIASES = routineAliases();
 // A handler for a kind the server does not know would make every claim a 400 RUNNER_KIND_UNKNOWN; refuse to start.
-// Blueprint ADR-137: the server knows RUNNER_JOB_KINDS and reply (RUNNER_KINDS).
+// Blueprint ADR-137: the server knows RUNNER_JOB_KINDS, reply, baseline-refresh and tracker-create (RUNNER_KINDS).
 const unlisted = [ ...JOB_HANDLERS.keys() ].filter( ( kind ) => !RUNNER_KINDS.includes( kind ) );
-if ( unlisted.length > 0 ) throw new Error( `blueprint-steward: job kinds ${ unlisted.join( ', ' ) } have handlers but are not in RUNNER_JOB_KINDS or reply` );
+if ( unlisted.length > 0 ) throw new Error( `blueprint-steward: job kinds ${ unlisted.join( ', ' ) } have handlers but are not in RUNNER_JOB_KINDS, reply, baseline-refresh or tracker-create` );
 const runKind = ( job ) => {
   const handler = JOB_HANDLERS.get( job.kind );
   if ( handler === undefined ) {

@@ -21,11 +21,19 @@
 // A tracker-transition job carries { issueKey, toStatusId }; Steward picks the transition leading there, since
 // transition ids differ per workflow and work type. A tracker-describe job carries { projectKey }; Steward answers the
 // project's work types and statuses.
+//
+// A tracker-create job carries { boardId, projectKey, issueTypeId, summary, description, label }, the ticket the server
+// drafted and the session's label; Steward searches the label first and creates the ticket only where no issue carries
+// it, reporting the ticket's { key }.
+//   create( { projectKey, issueTypeId, summary, description, label } ) -> { key }   creates the issue, the label on it
 
 export const TRACKER_POLL_JOB_KIND = 'tracker-poll';
 export const TRACKER_COMMENT_JOB_KIND = 'tracker-comment';
 export const TRACKER_TRANSITION_JOB_KIND = 'tracker-transition';
 export const TRACKER_DESCRIBE_JOB_KIND = 'tracker-describe';
+// Not in @bett3r-dev/blueprint-spec's RUNNER_JOB_KINDS yet; Blueprint's runnerJobs.ts CLAIMABLE_JOB_KINDS adds it (its
+// kind is trackerBoards.ts TRACKER_CREATE_JOB_KIND).
+export const TRACKER_CREATE_JOB_KIND = 'tracker-create';
 
 // A search is read page by page, by Jira's nextPageToken, to its last page or SEARCH_PAGE_LIMIT pages, and the report
 // says whether it reached the last and, if not, the token it stopped at; a later job's nextPageToken says where to
@@ -71,6 +79,19 @@ export const createJiraClient = ( { baseUrl, email, apiToken } ) => {
       if ( !response.ok ) throw jiraFailure( `POST ${ path } failed: ${ response.status }`, response.status );
       const created = await response.json();
       return { id: typeof created?.id === 'string' ? created.id : undefined };
+    },
+    // /rest/api/2/issue, whose description is a plain string, as a comment's body is: Steward does not shape the
+    // server's text into an Atlassian Document.
+    create: async ( { projectKey, issueTypeId, summary, description, label } ) => {
+      const path = '/rest/api/2/issue';
+      const response = await fetch( at( path ), {
+        method: 'POST',
+        headers: { authorization, accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify( { fields: { project: { key: projectKey }, issuetype: { id: issueTypeId }, summary, description, labels: [ label ] } } ),
+      } );
+      if ( !response.ok ) throw jiraFailure( `POST ${ path } failed: ${ response.status }`, response.status );
+      const created = await response.json();
+      return { key: typeof created?.key === 'string' ? created.key : undefined };
     },
     status: async ( issueKey ) => {
       const body = await get( `/rest/api/3/issue/${ encodeURIComponent( issueKey ) }`, { fields: 'status' } );
@@ -258,6 +279,32 @@ export const runTrackerDescribe = async ( job, client ) => {
 };
 
 /**
+ * Creates a tracker-create job's ticket through `client`, once. The session's label is searched first: an issue already
+ * carrying it is reported as the ticket, alreadyThere, with nothing posted, so a re-press after a lost report links the
+ * ticket it made; otherwise the issue is created with the label and its key reported. A Jira refusing the create fails
+ * the job, and nothing here tries again. A job whose payload names no project, work type, summary or label is failed
+ * before Jira is called; a credential Jira refuses fails auth-failed.
+ */
+export const runTrackerCreate = async ( job, client ) => {
+  const payload = job?.payload;
+  const named = ( value ) => typeof value === 'string' && value !== '';
+  if ( ![ payload?.projectKey, payload?.issueTypeId, payload?.summary, payload?.label ].every( named ) ) {
+    return { ok: false, result: 'the tracker-create job carried no project, work type, summary or label; Steward drafts none of its own' };
+  }
+  const { projectKey, issueTypeId, summary, label } = payload;
+  try {
+    const labelled = await client.search( `labels = ${ JSON.stringify( label ) }`, [ 'summary' ] );
+    const existing = labelled.issues[ 0 ]?.key;
+    if ( existing !== undefined ) return { ok: true, result: JSON.stringify( { key: existing, alreadyThere: true } ) };
+    const { key } = await client.create( { projectKey, issueTypeId, summary, description: payload.description, label } );
+    if ( key === undefined ) return { ok: false, result: 'Jira created the issue but answered no key' };
+    return { ok: true, result: JSON.stringify( { key } ) };
+  } catch ( err ) {
+    return failed( err );
+  }
+};
+
+/**
  * The dispatch entries (kind, handler) for the tracker kinds, which bin/blueprint-steward.mjs spreads into its
  * JOB_HANDLERS, passing the credential BLUEPRINT_JIRA_BASE_URL, BLUEPRINT_JIRA_EMAIL and BLUEPRINT_JIRA_API_TOKEN carry.
  * A credential missing any of the three gives none, so Steward's claim then never declares the tracker kinds.
@@ -271,5 +318,6 @@ export const trackerJobHandlers = ( { baseUrl, email, apiToken }, { createClient
     [ TRACKER_COMMENT_JOB_KIND, ( job ) => runTrackerComment( job, client ) ],
     [ TRACKER_TRANSITION_JOB_KIND, ( job ) => runTrackerTransition( job, client ) ],
     [ TRACKER_DESCRIBE_JOB_KIND, ( job ) => runTrackerDescribe( job, client ) ],
+    [ TRACKER_CREATE_JOB_KIND, ( job ) => runTrackerCreate( job, client ) ],
   ];
 };
