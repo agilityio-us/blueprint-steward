@@ -215,7 +215,8 @@ const commentInputShape = {
       })
     ] ).optional(),
     text: z.string(),
-    note: z.string().optional()
+    note: z.string().optional(),
+    answers: z.array( z.string()).min( 1 ).optional()
   }))
 };
 

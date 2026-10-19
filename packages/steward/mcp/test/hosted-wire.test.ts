@@ -280,6 +280,34 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     await client.close();
   });
 
+  it( 'Given a member comment on the host when the comment tool replies with answers naming it then the submission carries answers and the host stores them (Blueprint BP-287 D22)', async () => {
+    const host = createFakeHost({ design: { schemaVersion: 1, comments: [ { id: 'c1', anchor: null, text: 'why one step?', author: 'human', ts: new Date( 0 ).toISOString(), resolved: false } ] } });
+    const client = await connect( host );
+
+    const body = toolBody( await client.callTool({
+      name: 'comment', arguments: { entries: [ { anchor: { commentId: 'c1' }, text: 'one step keeps the cart', answers: [ 'c1' ] } ] }
+    }));
+
+    expect( body ).toMatchObject({ ok: true, commentIds: [ 'c2' ] });
+    const submitted = host.calls.find( call => call.route === SUBMIT_ROUTE );
+    expect( submitted?.args ).toMatchObject({ entries: [ { anchor: { commentId: 'c1' }, text: 'one step keeps the cart', answers: [ 'c1' ] } ] });
+    expect(( host.design.comments ?? []).map( entry => entry.answers )).toEqual( [ undefined, [ 'c1' ] ] );
+
+    await client.close();
+  });
+
+  it( 'Given the comment tool when answers is an empty list then the call is refused and nothing reaches the host (Blueprint BP-287 D22)', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const result = await client.callTool({ name: 'comment', arguments: { entries: [ { text: 'one step keeps the cart', answers: [] } ] } });
+
+    expect( result.isError ).toBe( true );
+    expect( host.calls.filter( call => call.route === SUBMIT_ROUTE )).toEqual( [] );
+
+    await client.close();
+  });
+
   it( 'Given a hosted reply job when hand_off is called then it forwards the hand-off verb over submit and answers the host\'s result; a host refusal comes back as its code (Blueprint ADR-137 decision 5)', async () => {
     // The answers as Blueprint's submit route sends them (sessionRoutes.ts handOff): the result, then a second call's refusal.
     const result = { verb: 'hand-off', postId: 'c-7', noteId: 'c-8', design: { queued: true, jobId: 'job-9', position: 'queued' } };

@@ -359,6 +359,8 @@ export type CommentArg = {
   anchor?: CommentAnchorArg;
   text: string;
   note?: string;
+  /** Blueprint BP-287 decisions.md D22: the member comments in this comment's thread it answers (DesignComment.answers). */
+  answers?: string[];
 };
 
 export type CommentArgs = {
@@ -395,7 +397,8 @@ export async function commentHandler(
       entries: ( args.entries ?? []).map( entry => ({
         anchor: toCommentAnchor( entry.anchor ),
         text: entry.text,
-        ...( entry.note !== undefined ? { note: entry.note } : {})
+        ...( entry.note !== undefined ? { note: entry.note } : {}),
+        ...( entry.answers !== undefined ? { answers: entry.answers } : {})
       })),
       author: 'ai'
     });
