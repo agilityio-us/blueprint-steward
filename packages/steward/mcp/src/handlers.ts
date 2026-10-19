@@ -661,6 +661,10 @@ function mapPostInput( args: MapPostArgs ): MapPostNodeInput | MapPostForkInput 
 // The card-chat scenario tools. One entry per call, thin over map-post (level scenario): a propose names no id and
 // the host mints one; a modify names the id and carries the full body. The host judges every status rule; the tool
 // never reads status to choose what it sends.
+// BP-229 (D6): blueprint-schema's ScenarioRejection. Declared here until this fork's installed blueprint-schema
+// carries it; present means the scenario asserts a refusal, and the host's store judges the code.
+export type ScenarioRejection = { code?: string };
+
 export type ScenarioBodyArgs = {
   title: string;
   anchors?: string[];
@@ -670,6 +674,7 @@ export type ScenarioBodyArgs = {
   then: GherkinStep[];
   examples?: ExamplesTable;
   supersedes?: string;
+  rejection?: ScenarioRejection;
 };
 
 export type MapProposeScenarioArgs = ScenarioBodyArgs;
@@ -682,7 +687,7 @@ export type MapScenarioToolResult = {
   scenario?: MapScenario;
 };
 
-function scenarioInput( args: ScenarioBodyArgs & { id?: string } ): MapPostScenarioInput {
+function scenarioInput( args: ScenarioBodyArgs & { id?: string } ): MapPostScenarioInput & { rejection?: ScenarioRejection } {
   return {
     level: 'scenario',
     ...( args.id !== undefined ? { id: args.id } : {}),
@@ -694,6 +699,7 @@ function scenarioInput( args: ScenarioBodyArgs & { id?: string } ): MapPostScena
     ...( args.examples !== undefined ? { examples: args.examples } : {}),
     ...( args.supersedes !== undefined ? { supersedes: args.supersedes } : {}),
     ...( args.covers !== undefined ? { covers: args.covers } : {}),
+    ...( args.rejection !== undefined ? { rejection: args.rejection } : {}),
     author: 'ai'
   };
 }
