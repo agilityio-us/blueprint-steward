@@ -20,6 +20,12 @@ export type FlowScope = {
   subdomains?: string[];
 };
 
+// A node's data shape as the graph carries it, passed through unread: the blueprint server's design door judges its
+// vocabulary (ADR-127). blueprint-schema 1.8.0's BlueprintNode does not declare the field, so it is typed here.
+export type FlowDataShape = Record<string, unknown>;
+
+type ShapedNode = BlueprintNode & { dataShape?: FlowDataShape };
+
 export type FlowNodeView = {
   id: string;
   type: NodeType;
@@ -33,6 +39,7 @@ export type FlowNodeView = {
   origin?: Origin;
   status?: DesignStatus;
   previousLabel?: string;
+  dataShape?: FlowDataShape;
   note?: string;
 };
 
@@ -63,7 +70,7 @@ const CROSS_SUBDOMAIN_MODE: Record<FlowBoundary, CrossSubdomainMode> = {
 const edgeKey = ( edge: { from: string; to: string; kind: EdgeKind }): string =>
   `${ edge.from }|${ edge.to }|${ edge.kind }`;
 
-function toNodeView( node: BlueprintNode, row: number, foreign: boolean ): FlowNodeView {
+function toNodeView( node: ShapedNode, row: number, foreign: boolean ): FlowNodeView {
   return {
     id: node.id,
     type: node.type,
@@ -77,6 +84,7 @@ function toNodeView( node: BlueprintNode, row: number, foreign: boolean ): FlowN
     ...( node.origin !== undefined && node.origin !== 'extracted' ? { origin: node.origin } : {}),
     ...( node.status !== undefined ? { status: node.status } : {}),
     ...( node.previousLabel !== undefined ? { previousLabel: node.previousLabel } : {}),
+    ...( node.dataShape !== undefined ? { dataShape: node.dataShape } : {}),
     ...( node.note !== undefined ? { note: node.note } : {})
   };
 }

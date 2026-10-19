@@ -217,6 +217,8 @@ export type ProposeNodeInput = {
   rule?: string;
   errorCodes?: string[];
   generic?: boolean;
+  /** The node's data shape, forwarded unread; the blueprint server's design door judges its vocabulary. */
+  dataShape?: Record<string, unknown>;
   note?: string;
 };
 

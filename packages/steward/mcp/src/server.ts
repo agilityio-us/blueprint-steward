@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import type { EdgeKind, EdgeKindSource, NodeType } from '@bett3r-dev/blueprint-schema';
+import type { DataShape, EdgeKind, EdgeKindSource, NodeType } from '@bett3r-dev/blueprint-schema';
 import {
   EDGE_KIND_SOURCES,
   EDGE_KINDS,
@@ -127,6 +127,11 @@ const querySchema = z.object({
   })
 });
 
+// A node's data shape is forwarded as sent: the blueprint server's design door judges its vocabulary (ADR-127), so the
+// shape is not restated here. Its description is the served text at nodes[].dataShape and entries[].set.dataShape.
+// Typed as the schema's DataShape (blueprint-schema 1.10.0) for the handlers; the passthrough still forwards it as sent.
+const dataShapeSchema = z.object({}).passthrough() as unknown as z.ZodType<DataShape>;
+
 const proposeInputShape = {
   nodes: z.array( z.object({
     type: z.enum( NODE_TYPE_VALUES ),
@@ -135,6 +140,7 @@ const proposeInputShape = {
     resourceKey: z.string().optional(),
     queries: z.array( querySchema ).optional(),
     tags: z.array( z.string() ).optional(),
+    dataShape: dataShapeSchema.optional(),
     note: z.string().optional()
   })).optional(),
   edges: z.array( proposeEdgeSchema ).optional()
@@ -148,7 +154,8 @@ const modifyInputShape = {
       subdomain: z.string().optional(),
       resourceKey: z.string().optional(),
       queries: z.array( querySchema ).optional(),
-      tags: z.array( z.string() ).optional()
+      tags: z.array( z.string() ).optional(),
+      dataShape: dataShapeSchema.optional()
     }).passthrough(),
     note: z.string().optional()
   }))
