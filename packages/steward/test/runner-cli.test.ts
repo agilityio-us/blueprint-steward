@@ -1007,21 +1007,55 @@ setInterval(() => {}, 1000);
   // The host answers a heartbeat for a job whose lease it no longer
   // holds with 404 RUNNER_JOB_NOT_CLAIMED; Steward then kills the child and reports nothing.
   it( 'start --once: a 404 RUNNER_JOB_NOT_CLAIMED heartbeat kills the running claude and posts no report', async () => {
-    // The first heartbeat is accepted (the child is running by then); the lease is lost before the next.
-    let beat = 0;
-    const host = await leaseHost( () => ( ++beat === 1 ? { body: { ok: true } }
-      : { status: 404, body: { ok: false, error: { code: 'RUNNER_JOB_NOT_CLAIMED', message: 'no claimed job jl with a live lease' } } } ) );
+    // Heartbeats are accepted until the child is running; the lease is lost at the next one.
     const claude = makeHangingClaude();
+    let refused = 0;
+    const host = await leaseHost( () => ( claude.pid() === undefined ? { body: { ok: true } }
+      : ( refused += 1, { status: 404, body: { ok: false, error: { code: 'RUNNER_JOB_NOT_CLAIMED', message: 'no claimed job jl with a live lease' } } } ) ) );
     const stop = stopAfter( 8000, claude );
     const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', makeRepo(), '--once', '--heartbeat', '0.3' ],
       { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: stop } );
     const beats = heartbeats( host, 'jl' );
-    expect( beats.length ).toBe( 2 );
+    // One lease, beaten from the claim: the refused beat is its last.
+    expect( refused ).toBe( 1 );
+    expect( beats.length ).toBeGreaterThanOrEqual( 1 );
     expect( beats[ 0 ].body ).toEqual( { intervalSeconds: 0.3 } );
     expect( beats[ 0 ].headers[ 'x-blueprint-session-id' ] ).toBe( 'sess-l' );
     expect( reports( host, 'jl' ) ).toEqual( [] );
     expect( [ stop.fired, r.code, claude.pid() !== undefined, alive( claude.pid() ) ] ).toEqual( [ false, 0, true, false ] );
   }, 20_000 );
+
+  // BP-290: the lease is beaten from the claim, not from the agent's spawn. An extraction past the 3-beat lease (kixie's
+  // worktree reinstalls node_modules and builds its extractor, ~4 min) is beaten through, so the host never reaps it.
+  it( 'start --once: an extraction longer than the lease is heartbeaten through, and the job is reported done', async () => {
+    const host = await leaseHost( () => ( { body: { ok: true } } ) );
+    const claude = makeFakeClaude( 0 );
+    const repo = makeRepo( 'sleep 1.5 && mkdir -p .blueprint && echo \'{"nodes":[1,2]}\' > .blueprint/graph.json' );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', '--heartbeat', '0.2' ],
+      { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: stopAfter( 15000 ) } );
+    expect( r.code ).toBe( 0 );
+    const agentStep = host.requests.findIndex( ( q ) => q.url === '/api/blueprint/steward/jobs/jl/heartbeat' && q.body?.step === 'agent' );
+    const extractStep = host.requests.findIndex( ( q ) => q.url === '/api/blueprint/steward/jobs/jl/heartbeat' && q.body?.step === 'extract' );
+    const during = host.requests.slice( extractStep, agentStep ).filter( ( q ) => q.url === '/api/blueprint/steward/jobs/jl/heartbeat' && q.body?.step === undefined );
+    expect( [ extractStep > -1, agentStep > extractStep ] ).toEqual( [ true, true ] );
+    expect( during.length ).toBeGreaterThanOrEqual( 4 );
+    expect( reports( host, 'jl' ).map( ( q ) => q.body.status ) ).toEqual( [ 'done' ] );
+  }, 30_000 );
+
+  it( 'start --once: a lease lost while the job extracts starts no agent and posts no report', async () => {
+    let beat = 0;
+    const host = await leaseHost( () => ( ++beat === 1 ? { body: { ok: true } }
+      : { status: 404, body: { ok: false, error: { code: 'RUNNER_JOB_NOT_CLAIMED', message: 'no claimed job jl with a live lease' } } } ) );
+    const claude = makeFakeClaude( 0 );
+    const repo = makeRepo( 'sleep 1.5 && mkdir -p .blueprint && echo \'{"nodes":[1,2]}\' > .blueprint/graph.json' );
+    const r = await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once', '--heartbeat', '0.2' ],
+      { BLUEPRINT_STEWARD_CLAUDE: claude.script }, { killWhen: stopAfter( 15000 ) } );
+    expect( r.code ).toBe( 0 );
+    expect( heartbeats( host, 'jl' ).length ).toBe( 2 );
+    expect( existsSync( claude.record ) ).toBe( false );
+    expect( reports( host, 'jl' ) ).toEqual( [] );
+    expect( r.stderr ).toContain( 'lost its lease; not reported' );
+  }, 30_000 );
 
   it( 'start --once: a heartbeat the host accepts keeps the child running until it exits on its own', async () => {
     const host = await leaseHost( () => ( { body: { ok: true } } ) );
