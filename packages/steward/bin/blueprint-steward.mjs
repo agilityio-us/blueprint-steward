@@ -611,6 +611,48 @@ const beatStep = async ( job, step ) => {
     .catch( ( err ) => { console.error( `blueprint-steward: step heartbeat (${ step }): ${ err.message }` ); } );
 };
 
+// Each running job's lease, by job id (keepLease). The agent's step reads its job's to learn the lease was lost.
+const leases = new Map();
+
+// Beats job `job`'s lease every --heartbeat seconds from its claim until stop(), so the lease outlives every step, not
+// only the agent's: a worktree that reinstalls its node_modules, an extraction that builds its extractor first, or a
+// wait for the session's lane runs past the 3-beat lease, and the host would reap the job worker-lost while Steward
+// still works it. A 404 RUNNER_JOB_NOT_CLAIMED means the host no longer holds the job as claimed with a live lease (it
+// was reaped as worker-lost, or reported): the beats end, `lost` turns true and each onLost listener runs, the agent's
+// stopping it. Any other refusal or network error is logged and the next beat still goes out.
+const keepLease = ( job ) => {
+  let timer;
+  let stopped = false;
+  const listeners = new Set();
+  const lease = {
+    lost: false,
+    // `listener` runs once the lease is lost, at once when it already is; the returned function unsubscribes it.
+    onLost: ( listener ) => {
+      if ( lease.lost ) listener();
+      else listeners.add( listener );
+      return () => { listeners.delete( listener ); };
+    },
+    stop: () => { stopped = true; clearTimeout( timer ); leases.delete( job.id ); },
+  };
+  const beat = () => call( stewardJobRoute( job.id, RUNNER_JOB_HEARTBEAT_SEGMENT ), { intervalSeconds: heartbeatSeconds }, { sessionId: job.sessionId } ).then(
+    () => { schedule(); },
+    ( err ) => {
+      if ( err.status === 404 && err.code === RUNNER_JOB_NOT_CLAIMED ) {
+        console.error( `blueprint-steward: the host no longer holds job ${ job.id }; its lease is lost` );
+        lease.lost = true;
+        for ( const listener of listeners ) listener();
+        listeners.clear();
+        return;
+      }
+      console.error( `blueprint-steward: heartbeat: ${ err.message }` );
+      schedule();
+    } );
+  const schedule = () => { if ( !stopped && !lease.lost ) timer = setTimeout( beat, heartbeatSeconds * 1000 ); };
+  schedule();
+  leases.set( job.id, lease );
+  return lease;
+};
+
 // claude's system/init event lists the plugins it loaded
 // (fixtures/claude-2.1.287-stream.jsonl). It is not always the first line: in a project with a SessionStart hook claude
 // first writes that hook's system/hook_started and system/hook_response events
@@ -830,28 +872,18 @@ const runAgent = ( job, sessionId, worktree, method, optionalTools = [], onActiv
     child.kill( 'SIGTERM' );
     timers.push( setTimeout( () => { if ( !exited ) child.kill( 'SIGKILL' ); }, KILL_GRACE_MS ) );
   };
-  // Every --heartbeat seconds Steward extends the job's lease. A 404
-  // RUNNER_JOB_NOT_CLAIMED means the host no longer holds the job as claimed with a live lease (the lease expired or
-  // was reaped as worker-lost, or the job was reported): the agent is stopped and no report is posted. Any other refusal or network error is logged and
-  // the next heartbeat still goes out.
-  const beat = () => call( stewardJobRoute( job.id, RUNNER_JOB_HEARTBEAT_SEGMENT ), { intervalSeconds: heartbeatSeconds }, { sessionId } ).then(
-    () => { schedule(); },
-    ( err ) => {
-      if ( err.status === 404 && err.code === RUNNER_JOB_NOT_CLAIMED ) {
-        console.error( `blueprint-steward: the host no longer holds job ${ job.id }; stopping the agent, no report` );
-        stop( 'lease-lost' );
-      } else {
-        console.error( `blueprint-steward: heartbeat: ${ err.message }` );
-        schedule();
-      }
-    } );
-  const schedule = () => { if ( !exited && stopped === undefined ) timers.push( setTimeout( beat, heartbeatSeconds * 1000 ) ); };
-  schedule();
+  // The job's lease is beaten from its claim (keepLease). Once the host no longer holds the job as claimed with a live
+  // lease (reaped as worker-lost, or reported), the agent is stopped and no report is posted.
+  const unsubscribe = leases.get( job.id )?.onLost( () => {
+    console.error( `blueprint-steward: stopping the agent of job ${ job.id }, no report` );
+    stop( 'lease-lost' );
+  } );
   // Past --max-run-minutes the agent is stopped and the job fails limit-wallclock.
   timers.push( setTimeout( () => { stop( 'wallclock' ); }, maxRunMinutes * 60_000 ) );
   // Blueprint ADR-137: once claude has run, the outcome carries the agent context it ran in and the size it started at.
   const finish = ( outcome, ran = true ) => {
     exited = true;
+    unsubscribe?.();
     for ( const timer of timers ) clearTimeout( timer );
     resolvePromise( ran && session.context !== undefined ? { ...outcome, context: { ...session.context, tokens: startedContextTokens( out ) } } : outcome );
   };
@@ -1286,6 +1318,8 @@ const runJob = async ( job, sessionId, hold ) => {
     if ( designPlugins.refused ) return designPlugins.refused;
     // Blueprint ADR-137: a reply job answers on the board as it stands, so it neither extracts nor pushes.
     if ( job.kind !== REPLY_JOB_KIND ) await push( { extract: true, sessionId, branch: branch ?? await git( 'rev-parse --abbrev-ref HEAD' ), dir, worktree: true, onStep } );
+    // A job the host reaped while it checked out or extracted runs no agent and is not reported.
+    if ( leases.get( job.id )?.lost === true ) return { ok: false, lost: true, result: 'the host gave up the lease before the agent started' };
     // Past its extraction a design round's agent shares the worktree with the session's replies.
     hold.share();
     // The agent's step is beaten before claude is spawned.
@@ -1521,11 +1555,17 @@ try {
     console.error( `blueprint-steward: polling ${ server } every ${ intervalMs / 1000 }s against ${ repo }, up to ${ concurrency } jobs at once` );
     const runAndReport = async ( job ) => {
       console.error( `blueprint-steward: claimed job ${ job.id } (${ job.kind })` );
+      // The lease is held from the claim to the report, whatever step the job is in or lane it waits for: a worktree
+      // that reinstalls its node_modules, or an extraction that builds its extractor first, runs past the 3-beat lease,
+      // and the host would reap the job worker-lost while Steward still works it.
+      const lease = keepLease( job );
       let outcome;
       try {
         outcome = await runKind( job );
       } catch ( err ) {
         outcome = { ok: false, result: err.message };
+      } finally {
+        lease.stop();
       }
       // A job whose lease the host gave up is no longer Steward's to report.
       if ( outcome.lost ) {
