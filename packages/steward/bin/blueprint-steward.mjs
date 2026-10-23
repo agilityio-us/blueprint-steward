@@ -357,6 +357,9 @@ const extractIn = async ( dir, command, { worktree } ) => {
   }
 };
 
+// A per-worktree ref (each session's worktree has its own): the commit its last accepted reality push was extracted at.
+const PUSHED_REF = 'refs/worktree/blueprint-pushed';
+
 // `branch` is the branch the push binds the session to: a job's branch, or the remote's default for a job with
 // none. Only when the caller passes no branch (a bare `push`) is it read from the checkout's HEAD. `dir` is where
 // the graph is extracted and whose commit is pushed: the --repo checkout, or a session's worktree.
@@ -389,6 +392,8 @@ const push = async ( { extract, sessionId, branch, dir = repo, worktree = false,
   };
   await onStep( 'push' );
   await call( REALITY_PUSH_ROUTE, payload, { sessionId } );
+  // A session's worktree remembers the commit its graph was last pushed from, for a refresh to skip (runBaselineRefresh).
+  if ( worktree && payload.commitSha ) await runGit( dir, [ 'update-ref', PUSHED_REF, payload.commitSha ] );
   const nodes = Array.isArray( graph.nodes ) ? graph.nodes.length : '?';
   console.log( `blueprint-steward: pushed ${ nodes } nodes from ${ payload.branch }@${ payload.commitSha?.slice( 0, 8 ) } to ${ server }` );
 };
@@ -1396,9 +1401,10 @@ const runScaffold = async ( job ) => {
   } );
 };
 
-// A baseline-refresh job brings the baseline's worktree to origin's tip of the job's branch (else origin's default),
-// extracts there and pushes it to the baseline; no agent runs. It runs in the session's lane, holding the worktree
-// exclusively, as a scaffold job does.
+// A baseline-refresh job brings the session's worktree to origin's tip of the job's branch (else origin's default),
+// extracts there and pushes it to the session; no agent runs. It runs in the session's lane, holding the worktree
+// exclusively, as a scaffold job does. A merge into the default branch queues one on the baseline, and Blueprint's "Check
+// git now" one on the session it is pressed on. A tip the worktree's graph was already pushed from is not extracted again.
 const runBaselineRefresh = async ( job ) => {
   const branch = job.branch || await remoteDefaultBranch() || undefined;
   const onStep = ( step ) => beatStep( job, step );
@@ -1408,6 +1414,9 @@ const runBaselineRefresh = async ( job ) => {
   } catch ( err ) {
     return { ok: false, reason: err.reason ?? 'checkout-failed', result: err.message };
   }
+  const tip = await gitIn( dir, 'rev-parse HEAD' );
+  if ( tip !== undefined && tip === await gitIn( dir, `rev-parse --verify --quiet ${ PUSHED_REF }` ) )
+    return { ok: true, result: `the graph of ${ branch ?? 'HEAD' }@${ tip.slice( 0, 8 ) } is already pushed` };
   await push( { extract: true, sessionId: job.sessionId, branch, dir, worktree: true, onStep } );
   return { ok: true, result: `refreshed the baseline from ${ branch ?? 'HEAD' }` };
 };
