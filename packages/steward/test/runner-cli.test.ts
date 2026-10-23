@@ -376,6 +376,33 @@ process.stdout.write(${ JSON.stringify( [ toolUse, toolResult, result ].map( ( e
     expect( existsSync( claude.record ) ).toBe( false );
   } );
 
+  // Blueprint's "Check git now" queues a baseline-refresh on the session it is pressed on, for its bound branch. A
+  // refresh at the tip the session's worktree last pushed from extracts nothing and pushes nothing; a new tip does.
+  it( 'start --once: a second baseline-refresh at the tip already pushed pushes nothing and reports done, and one after a new commit on origin pushes it', async () => {
+    const host = await fakeHost( ( req ) =>
+      req.url === '/api/blueprint/steward/claim' ? { body: { job: { id: 'jr', kind: 'baseline-refresh', sessionId: 'sess-x', branch: 'main', prompt: null } } } : {} );
+    const repo = makeRepo( 'mkdir -p .blueprint && echo \'{"nodes":[]}\' > .blueprint/graph.json && echo x >> extracted.log' );
+    const once = async () => {
+      host.requests.length = 0;
+      expect( ( await run( [ 'start', '--server', host.url, '--token', 'tok', '--repo', repo, '--once' ], { BLUEPRINT_STEWARD_CLAUDE: makeFakeClaude( 0 ).script } ) ).code ).toBe( 0 );
+      return unstepped( host.requests );
+    };
+    const extractions = () => readFileSync( join( worktreeOf( repo, 'sess-x' ), 'extracted.log' ), 'utf-8' ).trim().split( '\n' ).length;
+
+    expect( ( await once() ).map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/reality', '/api/blueprint/steward/jobs/jr' ] );
+    const again = await once();
+    expect( again.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/steward/jobs/jr' ] );
+    expect( again[ 1 ].body ).toMatchObject( { status: 'done' } );
+    expect( extractions() ).toBe( 1 );
+
+    execSync( 'git checkout -q -b moving && echo n > new.txt && git -c user.email=t@t -c user.name=t add new.txt && git -c user.email=t@t -c user.name=t commit -qm new'
+      + ' && git push -q origin moving:main && git checkout -q main && git branch -q -D moving', { cwd: repo } );
+    const newSha = execSync( 'git rev-parse origin/main', { cwd: repo, encoding: 'utf-8' } ).trim();
+    const moved = await once();
+    expect( moved.map( ( q ) => q.url ) ).toEqual( [ '/api/blueprint/steward/claim', '/api/blueprint/reality', '/api/blueprint/steward/jobs/jr' ] );
+    expect( moved[ 1 ].body ).toMatchObject( { branch: 'main', commitSha: newSha } );
+  } );
+
   // A fake host that binds a session to the branch of its latest reality push. A job on a session bound to feat/x
   // pushes feat/x, whatever the checkout had out.
   const bindingHost = ( jobBranch: string | null, bound: string | null ) => {
