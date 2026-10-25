@@ -361,6 +361,8 @@ export type CommentArg = {
   note?: string;
   /** Blueprint BP-287 decisions.md D22: the member comments in this comment's thread it answers (DesignComment.answers). */
   answers?: string[];
+  /** Blueprint ADR-140 decision 6: the owner's fork choices this reply proposes (DesignComment.proposedChoices). */
+  proposedChoices?: { fork: string; option: string | null }[];
 };
 
 export type CommentArgs = {
@@ -398,7 +400,8 @@ export async function commentHandler(
         anchor: toCommentAnchor( entry.anchor ),
         text: entry.text,
         ...( entry.note !== undefined ? { note: entry.note } : {}),
-        ...( entry.answers !== undefined ? { answers: entry.answers } : {})
+        ...( entry.answers !== undefined ? { answers: entry.answers } : {}),
+        ...( entry.proposedChoices !== undefined ? { proposedChoices: entry.proposedChoices } : {})
       })),
       author: 'ai'
     });

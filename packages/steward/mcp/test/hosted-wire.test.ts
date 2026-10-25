@@ -296,6 +296,33 @@ describe( 'blueprint-mcp hosted target over the wire', () => {
     await client.close();
   });
 
+  // Blueprint ADR-140 decision 6: an agent reply proposes the owner's fork choices; the board writes them on the owner's click.
+  it( 'Given the comment tool when a reply carries proposedChoices then the submission carries them as sent, a clear included (Blueprint ADR-140 decision 6)', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+    const proposedChoices = [ { fork: 'F-lunch', option: 'salad' }, { fork: 'F-music', option: null } ];
+
+    const body = toolBody( await client.callTool({ name: 'comment', arguments: { entries: [ { text: 'Confirm these on the board', proposedChoices } ] } }));
+
+    expect( body ).toMatchObject({ ok: true });
+    const submitted = host.calls.find( call => call.route === SUBMIT_ROUTE );
+    expect( submitted?.args ).toMatchObject({ entries: [ { text: 'Confirm these on the board', proposedChoices } ] });
+
+    await client.close();
+  });
+
+  it( 'Given the comment tool when proposedChoices is an empty list then the call is refused and nothing reaches the host (Blueprint ADR-140 decision 6)', async () => {
+    const host = createFakeHost();
+    const client = await connect( host );
+
+    const result = await client.callTool({ name: 'comment', arguments: { entries: [ { text: 'nothing to confirm', proposedChoices: [] } ] } });
+
+    expect( result.isError ).toBe( true );
+    expect( host.calls.filter( call => call.route === SUBMIT_ROUTE )).toEqual( [] );
+
+    await client.close();
+  });
+
   it( 'Given the comment tool when answers is an empty list then the call is refused and nothing reaches the host (Blueprint BP-287 D22)', async () => {
     const host = createFakeHost();
     const client = await connect( host );
