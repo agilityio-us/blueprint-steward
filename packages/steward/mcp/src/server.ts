@@ -216,7 +216,9 @@ const commentInputShape = {
     ] ).optional(),
     text: z.string(),
     note: z.string().optional(),
-    answers: z.array( z.string()).min( 1 ).optional()
+    answers: z.array( z.string()).min( 1 ).optional(),
+    // Blueprint ADR-140 decision 6: the owner's fork choices this reply proposes; the board writes them on the owner's click.
+    proposedChoices: z.array( z.object({ fork: z.string(), option: z.string().nullable() })).min( 1 ).optional()
   }))
 };
 
